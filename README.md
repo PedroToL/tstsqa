@@ -27,11 +27,17 @@ $$\text{Cov}(y, z) = \text{Cov}(\hat y, z) + \text{Cov}(\varepsilon, z)$$
 
 only the first term on the right is ever recovered. Rescaling the variance
 (stochastic augmentation) fixes the first problem but not the second.
+
 Quantile adjustment fixes both by shifting each imputed value according to
 the gap between the observed and predicted quantile functions at that
 value's rank:
 
 $$\eta(p) = Q_y(p) - Q_{\hat y}(p)$$
+
+Each observation is then adjusted by the realized value of this gap at its
+own predicted rank $p$:
+
+$$\tilde{y} = \hat{y} + \tilde{\eta}, \qquad \tilde{\eta} := \eta(p)$$
 
 This restores the full donor distribution exactly, and because the
 correction tracks each observation's position in the predicted-income
