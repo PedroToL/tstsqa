@@ -6,33 +6,39 @@ via quantile adjustment, implementing the method described in Torres-Lopez,
 
 ## What the method does
 
-Suppose you want to study the relationship between income (`y`) and some
-other variable (`z`) — consumption, wealth, parental income — but no single
-survey observes both. You have a **donor** sample with `y` and some
-predictors `X`, and a **target** sample with `z` and the same `X`, but never
-`y` and `z` together. The standard fix is to fit a model for `y` on `X` in
-the donor sample and use it to impute `y` in the target sample.
+Suppose you want to study the relationship between income ($y$) and another
+variable ($z$), such as consumption, wealth, or parental income, but no
+single survey observes both. A donor sample has $y$ and predictors $X$; a
+target sample has $z$ and the same $X$, but never $y$ and $z$ together. The
+standard approach fits a model for $y$ on $X$ in the donor sample and uses
+it to impute $y$ in the target sample.
 
-That imputation is biased in two ways:
+That imputation carries two distinct biases. Because the prediction
+$\hat y$ is a conditional expectation, its variance is mechanically smaller
+than the true variance of $y$:
 
-- **Variance bias**: predicted values are a conditional mean, so they're
-  mechanically less spread out than the real `y` — the imputed distribution
-  is too compressed.
-- **Covariance bias**: whatever part of `y` isn't explained by `X` is lost
-  entirely, so the imputed values understate (or distort) their true
-  relationship with `z`.
+$$\text{Var}(\hat y) = R^2 \cdot \text{Var}(y)$$
 
-Simply rescaling the variance (stochastic augmentation) fixes the first
-problem but not the second. **Quantile adjustment** fixes both at once: it
-shifts each imputed value by the gap between the *observed* and *predicted*
-quantile functions at that value's rank, `eta(p) = Q_y(p) - Q_yhat(p)`. This
-exactly restores the full donor distribution, and — because the correction
-tracks each observation's position in the predicted-income ranking — it can
-also shift the imputed covariance with `z` back toward the truth.
+so the imputed distribution ends up compressed relative to the truth. At
+the same time, whatever part of $y$ is not explained by $X$ is dropped
+entirely from the imputation, which biases its covariance with $z$ as well:
 
-Whether it helps or hurts depends on how well the chosen predictors align
-with both `y` and `z`; `qa_diagnose()` (below) is built to help decide that
-before you run the adjustment.
+$$\text{Cov}(y, z) = \text{Cov}(\hat y, z) + \text{Cov}(\varepsilon, z)$$
+
+only the first term on the right is ever recovered. Rescaling the variance
+(stochastic augmentation) fixes the first problem but not the second.
+Quantile adjustment fixes both by shifting each imputed value according to
+the gap between the observed and predicted quantile functions at that
+value's rank:
+
+$$\eta(p) = Q_y(p) - Q_{\hat y}(p)$$
+
+This restores the full donor distribution exactly, and because the
+correction tracks each observation's position in the predicted-income
+ranking, it can also shift the imputed covariance with $z$ toward the
+truth. Whether it helps or hurts depends on how well the chosen predictors
+align with both $y$ and $z$. `qa_diagnose()`, below, checks that before you
+run the adjustment.
 
 ## Installation
 
@@ -59,24 +65,29 @@ target <- data.frame(X = X[2501:5000])
 result <- qa_fit(donor, target, y_var = "y", x_vars = "X", outcome_scale = "log",
                   plotting = TRUE, annotate_p = 0.9)
 
+head(result$y_adjusted)
+#> [1]  0.867  7.353  0.831  1.082 10.041  1.187
+
 result$eta_plot
 ```
 
+<p align="center">
 <img src="man/figures/README-eta-plot.png" width="600"/>
+</p>
 
 `result$y_adjusted` holds the corrected imputed values for the target
-sample; `result$eta_plot` shows the estimated quantile-gap function
-`eta(p)` that produced them — the raw grid estimates as points, the
-smoothed curve used internally, and (since `annotate_p = 0.9`) the exact
+sample. `result$eta_plot` (above) shows the quantile-gap function
+$\hat\eta(p)$ that produced them: the raw grid estimates as points, the
+smoothed curve used internally, and, since `annotate_p = 0.9`, the exact
 adjustment applied at the 90th percentile.
 
 ### 2. Choose predictors and check the regime with `qa_diagnose()`
 
-Adding a predictor doesn't always help: one that predicts `z` well but adds
-little to predicting `y` can inflate the correction beyond what's actually
+Adding a predictor doesn't always help: one that predicts $z$ well but adds
+little to predicting $y$ can inflate the correction beyond what's
 justified. `qa_diagnose()` screens candidate predictors against this
-failure mode via bootstrap, then searches the survivors for the
-best-fitting specification:
+failure mode by bootstrap, then searches the survivors for the
+best-fitting specification.
 
 ```r
 set.seed(7)
@@ -92,64 +103,124 @@ target2 <- data.frame(X1 = X1[5001:10000], X2 = X2[5001:10000], X3 = X3[5001:100
                        z1 = z1[5001:10000], z2 = z2[5001:10000])
 
 diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
-                          x_vars = c("X1", "X2", "X3"), plotting = TRUE)
+                          x_vars = c("X1", "X2", "X3"), B = 30, plotting = TRUE)
+#> ========== Variable Selection ==========
+#>
+#> --- Iteration 1 ---
+#> Variables: X1, X2, X3
+#> Bootstrap progress: 1/30 ... 30/30
+#> Top 5 S_i(z_k) pairs (mean, 95% CI across 30 subsamples):
+#>  predictor z_var       mean_S     ci_lower     ci_upper
+#>         X2    z1 2708.3087955 493.52607164 1.577892e+04
+#>         X3    z2    2.4326821   2.21827069 2.666602e+00
+#>         X2    z2    2.2685998   0.06162247 2.237798e+01
+#>         X1    z2    1.0571185   0.99256450 1.140386e+00
+#>         X1    z1    0.2465681   0.22015387 2.654167e-01
+#>
+#> At least one pair exceeds tau = 10.0: mean S(X2, z1) = 2708.31
+#> Removing 'X2'.
+#>
+#> --- Iteration 2 ---
+#> Variables: X1, X3
+#> Bootstrap progress: 1/30 ... 30/30
+#> Top 4 S_i(z_k) pairs (mean, 95% CI across 30 subsamples):
+#>  predictor z_var      mean_S     ci_lower    ci_upper
+#>         X3    z2 2.464832776 2.223415e+00 2.673477826
+#>         X1    z2 1.053180132 9.681558e-01 1.162441546
+#>         X1    z1 0.234582455 1.969436e-01 0.276808184
+#>         X3    z1 0.001597067 1.488534e-05 0.007081496
+#>
+#> No pair exceeds tau = 10.0. Variable selection converged.
+#> Stage 1 survivors: X1, X3
+#>
+#> ========== Model Selection ==========
+#> Testing 3 candidate specification(s) via 5-fold CV, bootstrapped over 30 subsamples.
+#> Top 3 specifications by mean OOS R^2 (95% CI):
+#>  specification mean_r2_oos  ci_lower  ci_upper
+#>        X1 + X3   0.4402889 0.4204332 0.4566970
+#>             X1   0.3049040 0.2852253 0.3223067
+#>             X3   0.1217892 0.1099342 0.1365723
+#>
+#> Selected model: X1, X3 (mean OOS R^2 = 0.4403, 95% CI [0.4204, 0.4567])
+#>
+#> rho*:
+#>     z1     z2
+#> 0.1072 0.6396
 
 diagnosis$S_plot
 ```
 
+<p align="center">
 <img src="man/figures/README-s-plot.png" width="600"/>
+</p>
 
-`X2` gets screened out (it inflates the correction for `z1` far more than
-it improves the fit for `y`), leaving `X1` and `X3` — both comfortably
-under the screening thresholds shown as dashed lines. `diagnosis$rho_star`
-then reports, for each `z`, the residual correlation at which the
-adjustment would exactly recover the true covariance — a diagnostic for
-whether you're likely under-correcting, over-correcting, or moving in the
-wrong direction entirely.
+`X2` gets screened out: it inflates the correction for `z1` far more than
+it improves the fit for `y`. `X1` and `X3` survive, both comfortably under
+the screening thresholds shown as dashed lines. `diagnosis$rho_star`
+reports, for each `z`, the residual correlation at which the adjustment
+would exactly recover the true covariance.
 
 ### 3. Refit explicitly on the selected predictors
 
-`qa_diagnose()` tells you *which* predictors to use; running `qa_fit()`
-again explicitly on `diagnosis$selected_predictors` gives you both a fresh
-`eta_plot` for that final specification and a fitted model. The donor
-sample is the only place we can actually check the first stage's
-predictions against reality — `y` is never observed in the target sample,
-in a real application or in this simulation:
+`qa_diagnose()` tells you which predictors to use. The donor sample is the
+only place we can check the first stage's predictions against reality
+directly, since $y$ is never observed in the target sample, so this refit
+splits the donor sample itself into a training half and a held-out half:
 
 ```r
-final_fit <- qa_fit(donor2, target2, y_var = "y",
+donor_train   <- donor2[1:2500, ]
+donor_holdout <- donor2[2501:5000, ]
+
+final_fit <- qa_fit(donor_train, donor_holdout, y_var = "y",
                      x_vars = diagnosis$selected_predictors,
                      outcome_scale = "log", plotting = TRUE, annotate_p = 0.9)
 
 final_fit$eta_plot
 ```
 
+<p align="center">
 <img src="man/figures/README-eta-plot-final.png" width="600"/>
+</p>
+
+`final_fit` was fit only on `donor_train`, then applied to `donor_holdout`
+as if it were the target sample. Because `donor_holdout` is still donor
+data, its true `y` is known, which makes it possible to compare three
+things directly: the observed values, the raw (uncorrected) predictions,
+and the quantile-adjusted predictions.
 
 ```r
-observed_log_y  <- log(donor2$y)
-predicted_log_y <- observed_log_y - final_fit$donor_resid   # donor_resid = y_model - y_hat_d
+observed_log_y  <- log(donor_holdout$y)
+predicted_log_y <- final_fit$y_hat_target       # already on the log scale
+adjusted_log_y  <- log(final_fit$y_adjusted)    # y_adjusted is on the level scale
+
+round(c(observed = var(observed_log_y), predicted = var(predicted_log_y),
+        adjusted = var(adjusted_log_y)), 3)
+#> observed predicted  adjusted
+#>    1.071     0.486     1.090
 
 density_df <- data.frame(
-  log_y = c(observed_log_y, predicted_log_y),
-  type  = rep(c("Observed", "Predicted"), each = length(observed_log_y))
+  log_y = c(observed_log_y, predicted_log_y, adjusted_log_y),
+  type  = rep(c("Observed", "Predicted", "Adjusted"), each = length(observed_log_y))
 )
 
 ggplot2::ggplot(density_df, ggplot2::aes(log_y, color = type, linetype = type)) +
   ggplot2::geom_density(linewidth = 1.1) +
-  ggplot2::scale_linetype_manual(values = c(Observed = "solid", Predicted = "dotted"))
+  ggplot2::scale_linetype_manual(values = c(Observed = "solid", Predicted = "dotted",
+                                              Adjusted = "dashed"))
 ```
 
+<p align="center">
 <img src="man/figures/README-density-plot.png" width="600"/>
+</p>
 
-The predicted distribution is visibly more peaked and thinner-tailed than
-the observed one — the variance bias the whole method is built to correct.
-`qa_fit()`'s quantile adjustment (Section 1) is exactly what fixes this:
-`result$y_adjusted` restores the full observed shape rather than just
-rescaling the variance.
+The raw predicted distribution is visibly more peaked and thinner-tailed
+than the observed one: that gap is the variance bias described above. The
+adjusted distribution sits almost exactly on top of the observed one,
+recovering both its variance and its shape, on data the adjustment never
+saw during fitting.
 
 See `?qa_fit` and `?qa_diagnose` for full argument documentation.
 
 ## License
 
-MIT © Pedro Torres-Lopez
+MIT © Pedro J. Torres-Lopez

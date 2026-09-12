@@ -317,7 +317,9 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
       ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "gray60") +
       ggplot2::labs(x = "Quantile position p", y = expression(hat(eta)(p))) +
       ggplot2::theme_minimal(base_size = 13) +
-      ggplot2::theme(panel.grid.minor = ggplot2::element_blank())
+      ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                     plot.background = ggplot2::element_rect(fill = "white", color = NA),
+                     panel.background = ggplot2::element_rect(fill = "white", color = NA))
 
     # Optional annotation of the gap at a single user-chosen quantile position,
     # read directly off the fitted spline (the same object used internally

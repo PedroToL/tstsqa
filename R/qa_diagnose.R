@@ -513,7 +513,9 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       ggplot2::scale_fill_brewer(palette = "Set2") +
       ggplot2::theme_minimal(base_size = 13) +
       ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
-                     legend.position = "top")
+                     legend.position = "top",
+                     plot.background = ggplot2::element_rect(fill = "white", color = NA),
+                     panel.background = ggplot2::element_rect(fill = "white", color = NA))
   }
 
   # ==========================================================================
