@@ -1,0 +1,27 @@
+Package: tstsqa
+Type: Package
+Title: Bias Reduction for Two-Sample Two-Stage (TSTS) Imputation via Quantile Adjustment
+Version: 0.1.0
+Authors@R: person("Pedro", "Torres-Lopez", email = "p.torres-lopez@lse.ac.uk",
+    role = c("aut", "cre"))
+Description: Implements the quantile adjustment method for correcting variance
+    bias and covariance bias in two-sample two-stage (TSTS) survey-to-survey
+    imputation, as described in Torres-Lopez, "Bias Reduction in TSTSLS
+    Applications: A Quantile Adjustment Method." Provides a function to
+    construct and apply the quantile-gap adjustment to a target sample
+    ('qa_fit'), and a function implementing the paper's
+    bootstrap-based predictor screening, cross-validated model selection,
+    and regime diagnostic ('qa_diagnose').
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 3.5)
+Imports:
+    stats,
+    utils,
+    Hmisc,
+    rlang
+Suggests:
+    ggplot2,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0
