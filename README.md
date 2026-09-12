@@ -2,7 +2,7 @@
 
 Bias reduction for two-sample two-stage (TSTS) survey-to-survey imputation
 via quantile adjustment, implementing the method described in Torres-Lopez,
-*"Bias Reduction in TSTSLS Applications: A Quantile Adjustment Method."*
+*["Bias Reduction in TSTSLS Applications: A Quantile Adjustment Method."](https://www.dropbox.com/scl/fi/ds3jch4xx7xsevkc200x5/TorresLopez_BiasReductionTSTS_JMP.pdf?rlkey=mnlf7n4odn19hmok4e5im94ew&e=4&dl=0)*
 
 ## What the method does
 
@@ -226,6 +226,22 @@ recovering both its variance and its shape, on data the adjustment never
 saw during fitting.
 
 See `?qa_fit` and `?qa_diagnose` for full argument documentation.
+
+## suggested Citation
+
+If you use this package, please cite the underlying paper:
+
+> Torres-Lopez, P. J. (Forthcoming). *Bias Reduction in TSTSLS Applications: A
+> Quantile Adjustment Method*. 
+
+```bibtex
+@techreport{torreslopez2026bias,
+  title       = {Bias Reduction in {TSTSLS} Applications: A Quantile Adjustment Method},
+  author      = {Torres-Lopez, Pedro J.},
+  year        = {Forthcoming},
+  url         = {https://www.dropbox.com/scl/fi/ds3jch4xx7xsevkc200x5/TorresLopez_BiasReductionTSTS_JMP.pdf}
+}
+```
 
 ## License
 
