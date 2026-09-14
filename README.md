@@ -81,13 +81,13 @@ $\hat\eta(p)$ that produced them: the raw grid estimates as points, the
 smoothed curve used internally, and, since `annotate_p = 0.9`, the exact
 adjustment applied at the 90th percentile.
 
-### 2. Choose predictors and check the regime with `qa_diagnose()`
+### 2. Screen predictors and estimate the regime with `qa_diagnose()`
 
 Adding a predictor doesn't always help: one that predicts $z$ well but adds
 little to predicting $y$ can inflate the correction beyond what's
 justified. `qa_diagnose()` screens candidate predictors against this
-failure mode by bootstrap, then searches the survivors for the
-best-fitting specification.
+failure mode by bootstrap, then bootstraps $R^2_{y,d}$ and $\rho^*$ for the
+survivors, each with a 95% CI rather than a single point estimate.
 
 ```r
 set.seed(7)
@@ -104,11 +104,12 @@ target2 <- data.frame(X1 = X1[5001:10000], X2 = X2[5001:10000], X3 = X3[5001:100
 
 diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
                           x_vars = c("X1", "X2", "X3"), B = 30, plotting = TRUE)
+#> Outcome scale: log
 #> ========== Variable Selection ==========
 #>
 #> --- Iteration 1 ---
 #> Variables: X1, X2, X3
-#> Bootstrap progress: 1/30 ... 30/30
+#> Bootstrap progress: 1/30 (3%) - ETA: -- ... 30/30 (100%) - ETA: 0s
 #> Top 5 S_i(z_k) pairs (mean, 95% CI across 30 subsamples):
 #>  predictor z_var       mean_S     ci_lower     ci_upper
 #>         X2    z1 2708.3087955 493.52607164 1.577892e+04
@@ -122,7 +123,7 @@ diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
 #>
 #> --- Iteration 2 ---
 #> Variables: X1, X3
-#> Bootstrap progress: 1/30 ... 30/30
+#> Bootstrap progress: 1/30 (3%) - ETA: -- ... 30/30 (100%) - ETA: 0s
 #> Top 4 S_i(z_k) pairs (mean, 95% CI across 30 subsamples):
 #>  predictor z_var      mean_S     ci_lower    ci_upper
 #>         X3    z2 2.464832776 2.223415e+00 2.673477826
@@ -131,21 +132,17 @@ diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
 #>         X3    z1 0.001597067 1.488534e-05 0.007081496
 #>
 #> No pair exceeds tau = 10.0. Variable selection converged.
+#>
 #> Stage 1 survivors: X1, X3
 #>
-#> ========== Model Selection ==========
-#> Testing 3 candidate specification(s) via 5-fold CV, bootstrapped over 30 subsamples.
-#> Top 3 specifications by mean OOS R^2 (95% CI):
-#>  specification mean_r2_oos  ci_lower  ci_upper
-#>        X1 + X3   0.4402889 0.4204332 0.4566970
-#>             X1   0.3049040 0.2852253 0.3223067
-#>             X3   0.1217892 0.1099342 0.1365723
-#>
-#> Selected model: X1, X3 (mean OOS R^2 = 0.4403, 95% CI [0.4204, 0.4567])
+#> ========== Final Estimation ==========
+#> Bootstrap progress: 1/30 (3%) - ETA: -- ... 30/30 (100%) - ETA: 0s
+#> R^2_y,d: mean = 0.4398, 95% CI [0.4216, 0.4594]
 #>
 #> rho*:
-#>     z1     z2
-#> 0.1072 0.6396
+#>  z_var   mean ci_lower ci_upper
+#>     z1 0.1069   0.0942   0.1205
+#>     z2 0.6369   0.6074   0.6647
 
 diagnosis$S_plot
 ```
@@ -156,9 +153,10 @@ diagnosis$S_plot
 
 `X2` gets screened out: it inflates the correction for `z1` far more than
 it improves the fit for `y`. `X1` and `X3` survive, both comfortably under
-the screening thresholds shown as dashed lines. `diagnosis$rho_star`
-reports, for each `z`, the residual correlation at which the adjustment
-would exactly recover the true covariance.
+the screening thresholds shown as dashed lines. `diagnosis$R2_y_donor` and
+`diagnosis$rho_star` each hold `mean`/`ci_lower`/`ci_upper`: the first-stage
+fit quality and, for each `z`, the residual correlation at which the
+adjustment would exactly recover the true covariance.
 
 ### 3. Refit explicitly on the selected predictors
 
@@ -196,7 +194,7 @@ adjusted_log_y  <- log(final_fit$y_adjusted)    # y_adjusted is on the level sca
 round(c(observed = var(observed_log_y), predicted = var(predicted_log_y),
         adjusted = var(adjusted_log_y)), 3)
 #> observed predicted  adjusted
-#>    1.071     0.486     1.090
+#>    1.071     0.486     1.091
 
 density_df <- data.frame(
   log_y = c(observed_log_y, predicted_log_y, adjusted_log_y),
