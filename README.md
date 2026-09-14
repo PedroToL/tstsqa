@@ -2,7 +2,7 @@
 
 Bias reduction for two-sample two-stage (TSTS) survey-to-survey imputation
 via quantile adjustment, implementing the method described in Torres-Lopez,
-*["Bias Reduction in TSTSLS Applications: A Quantile Adjustment Method."](https://www.dropbox.com/scl/fi/ds3jch4xx7xsevkc200x5/TorresLopez_BiasReductionTSTS_JMP.pdf?rlkey=mnlf7n4odn19hmok4e5im94ew&e=4&dl=0)*
+*"Bias Reduction in TSTSLS Applications: A Quantile Adjustment Method."*
 
 ## What the method does
 
@@ -27,17 +27,11 @@ $$\text{Cov}(y, z) = \text{Cov}(\hat y, z) + \text{Cov}(\varepsilon, z)$$
 
 only the first term on the right is ever recovered. Rescaling the variance
 (stochastic augmentation) fixes the first problem but not the second.
-
 Quantile adjustment fixes both by shifting each imputed value according to
 the gap between the observed and predicted quantile functions at that
 value's rank:
 
 $$\eta(p) = Q_y(p) - Q_{\hat y}(p)$$
-
-Each observation is then adjusted by the realized value of this gap at its
-own predicted rank $p$:
-
-$$\tilde{y} = \hat{y} + \tilde{\eta}, \qquad \tilde{\eta} := \eta(p)$$
 
 This restores the full donor distribution exactly, and because the
 correction tracks each observation's position in the predicted-income
@@ -226,22 +220,6 @@ recovering both its variance and its shape, on data the adjustment never
 saw during fitting.
 
 See `?qa_fit` and `?qa_diagnose` for full argument documentation.
-
-## suggested Citation
-
-If you use this package, please cite the underlying paper:
-
-> Torres-Lopez, P. J. (Forthcoming). *Bias Reduction in TSTSLS Applications: A
-> Quantile Adjustment Method*. 
-
-```bibtex
-@techreport{torreslopez2026bias,
-  title       = {Bias Reduction in {TSTSLS} Applications: A Quantile Adjustment Method},
-  author      = {Torres-Lopez, Pedro J.},
-  year        = {Forthcoming},
-  url         = {https://www.dropbox.com/scl/fi/ds3jch4xx7xsevkc200x5/TorresLopez_BiasReductionTSTS_JMP.pdf}
-}
-```
 
 ## License
 

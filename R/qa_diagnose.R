@@ -340,10 +340,11 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     stop(sprintf("target_data is missing column(s): %s", paste(missing_in_target, collapse = ", ")))
   }
   if (!is.numeric(donor_data[[y_var]])) stop(sprintf("donor_data[['%s']] must be numeric.", y_var))
-  for (v in x_vars) {
-    if (!is.numeric(donor_data[[v]]))  stop(sprintf("donor_data[['%s']] must be numeric.", v))
-    if (!is.numeric(target_data[[v]])) stop(sprintf("target_data[['%s']] must be numeric.", v))
-  }
+  # x_vars are only ever used as predictors (right-hand side of a formula),
+  # where lm()/glm() handle factors and character columns natively -- no
+  # numeric requirement here. z_vars, in contrast, are used as the RESPONSE
+  # in z_k ~ x_vars regressions and directly in var()/cov() for the rho*
+  # calculation, both of which require a numeric variable.
   for (v in z_vars) {
     if (!is.numeric(target_data[[v]])) stop(sprintf("target_data[['%s']] must be numeric.", v))
   }

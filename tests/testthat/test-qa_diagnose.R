@@ -65,6 +65,27 @@ test_that("verbose = TRUE prints the documented progress messages", {
   )
 })
 
+test_that("factor x_vars are accepted (not just numeric)", {
+  d <- make_toy_data()
+  d$donor$region  <- factor(sample(c("A", "B", "C"), nrow(d$donor), replace = TRUE))
+  d$target$region <- factor(sample(c("A", "B", "C"), nrow(d$target), replace = TRUE))
+  result <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"),
+    x_vars = c("X1", "X2", "X3", "region"), B = 5, verbose = FALSE
+  ))
+  expect_true(is.list(result))
+})
+
+test_that("z_vars must still be numeric (factor z is rejected with a clear error)", {
+  d <- make_toy_data()
+  d$target$z1 <- factor(d$target$z1 > 0)
+  expect_error(
+    qa_diagnose(d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"),
+                 x_vars = c("X1", "X2", "X3"), B = 5, verbose = FALSE),
+    "must be numeric"
+  )
+})
+
 # ---------------------------------------------------------------------------
 # Input validation: types and structure
 # ---------------------------------------------------------------------------
