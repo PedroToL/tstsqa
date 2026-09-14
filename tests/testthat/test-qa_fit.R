@@ -198,6 +198,31 @@ test_that("annotate_p outside the estimated grid range warns", {
     "extrapolation"
   )
 })
+test_that("target level absent from donor is rejected upfront", {
+  d <- make_toy_data()
+  d$donor$region  <- factor(sample(c("A", "B"), nrow(d$donor), replace = TRUE))
+  d$target$region <- factor(sample(c("A", "B", "C"), nrow(d$target), replace = TRUE))  # "C" unseen by donor
+  expect_error(
+    qa_fit(d$donor, d$target, "y", c("X", "region")),
+    "not present in donor_data"
+  )
+})
+
+test_that("donor level absent from target warns but does not stop", {
+  d <- make_toy_data()
+  d$donor$region  <- factor(sample(c("A", "B", "C"), nrow(d$donor), replace = TRUE))
+  d$target$region <- factor(sample(c("A", "B"), nrow(d$target), replace = TRUE))  # donor has extra "C"
+  suppress_common_support <- function(expr) {
+    withCallingHandlers(expr, warning = function(w) {
+      if (grepl("common support", conditionMessage(w))) invokeRestart("muffleWarning")
+    })
+  }
+  expect_warning(
+    result <- suppress_common_support(qa_fit(d$donor, d$target, "y", c("X", "region"))),
+    "not present in target_data"
+  )
+  expect_true(is.list(result))
+})
 
 # ---------------------------------------------------------------------------
 # Plotting

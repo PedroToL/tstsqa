@@ -3,18 +3,21 @@
 # Section 5.4 end-to-end:
 #
 #   VARIABLE SELECTION (Stage 1): for each candidate predictor set, starting
-#   from the full model, draw B subsamples of size n* = min(n, 5000) from
-#   donor and target (independently; without replacement if n > 5000, with
-#   replacement -- classic bootstrap -- if n <= 5000), compute S_i(z_k) (in-
-#   sample R^2 within each subsample) on every subsample, and average. If
-#   the bootstrap MEAN of any (i, z_k) pair exceeds tau, drop the predictor
-#   with the highest mean S and repeat on a fresh set of B subsamples for
-#   the reduced predictor set. Stop when no pair's mean S exceeds tau.
+#   from the full model, draw B subsamples of size n* = min(n, subsample_cap)
+#   from donor and target (independently; without replacement if n exceeds
+#   the cap, with replacement -- classic bootstrap -- otherwise), compute
+#   S_i(z_k) (in-sample R^2 within each subsample) on every subsample, and
+#   average. If the bootstrap MEAN of any (i, z_k) pair exceeds tau, drop
+#   the predictor with the highest mean S and repeat on a fresh set of B
+#   subsamples for the reduced predictor set. Stop when no pair's mean S
+#   exceeds tau.
 #
 #   MODEL SELECTION (Stage 2): among the Stage 1 survivors, exhaustively
-#   search all non-empty subsets and pick the one maximising k-fold
-#   cross-validated R^2_{y,d}, evaluated on a SINGLE subsample of size
-#   n* = min(n_donor, 5000).
+#   search all non-empty subsets and pick the one maximising mean k-fold
+#   cross-validated R^2_{y,d}, bootstrapped over the SAME B subsamples
+#   (paired resampling; size n* = min(n_donor, subsample_cap) each), so a
+#   95% CI is available for the chosen specification's OOS R^2 alongside
+#   the point estimate.
 #
 #   Finally, fits the selected specification on the FULL data and reports
 #   rho* (Eq. 12) via qa_fit().
@@ -156,10 +159,13 @@
 }
 
 # --- Small internal helper: draw one bootstrap/subsample from a data frame -
-.draw_subsample <- function(data) {
+# cap = Inf (or any value >= nrow(data)) means every draw uses the FULL
+# sample, with replacement (classic bootstrap) -- see subsample_cap in
+# qa_diagnose() for why a user might want this.
+.draw_subsample <- function(data, cap) {
   n <- nrow(data)
-  n_star <- min(n, 5000)
-  replace <- n <= 5000
+  n_star <- min(n, cap)
+  replace <- n <= cap
   idx <- sample(seq_len(n), n_star, replace = replace)
   data[idx, , drop = FALSE]
 }
@@ -178,9 +184,10 @@
 #'
 #' \strong{Stage 1 (Variable Selection).} Starting from the full candidate
 #' set \code{x_vars}, at each iteration \code{B} subsamples of size
-#' \eqn{n^* = \min(n, 5000)} are drawn independently from \code{donor_data}
-#' and \code{target_data} (without replacement if the original sample size
-#' exceeds 5000, with replacement -- i.e. a classic bootstrap -- otherwise).
+#' \eqn{n^* = \min(n, \code{subsample\_cap})} are drawn independently from
+#' \code{donor_data} and \code{target_data} (without replacement if the
+#' original sample size exceeds \code{subsample_cap}, with replacement --
+#' i.e. a classic bootstrap -- otherwise).
 #' On every subsample, the leave-one-out ratio
 #' \eqn{S_i(z_k) = \Delta R^2_{z_k,t} / \Delta R^2_{y,d}} is computed for
 #' every predictor \eqn{i} still in the active set and every external
@@ -222,7 +229,11 @@
 #'   columns.
 #' @param target_data Data frame containing the target sample. Must include
 #'   all \code{x_vars} and \code{z_vars}, with no missing values in these
-#'   columns.
+#'   columns. For any \code{x_vars} column that is a factor or character,
+#'   every level present in \code{target_data} must also appear in
+#'   \code{donor_data} (checked upfront and rejected with \code{stop()}
+#'   otherwise); a level present in \code{donor_data} but absent from
+#'   \code{target_data} triggers a \code{warning()} instead.
 #' @param y_var Character string naming the outcome column in
 #'   \code{donor_data}. Must not also appear in \code{x_vars} or
 #'   \code{z_vars}.
@@ -247,6 +258,21 @@
 #'   Stage 2. Default 5.
 #' @param n_grid Passed through to the final \code{\link{qa_fit}}
 #'   call; see its documentation.
+#' @param subsample_cap Upper limit on the size of each bootstrap/subsample
+#'   draw: \eqn{n^* = \min(n, \code{subsample\_cap})}, drawn without
+#'   replacement if the original sample exceeds this cap, with replacement
+#'   (a classic bootstrap) otherwise. Default 5000, matching the paper's
+#'   suggested default. Set to \code{Inf} (or any value at or above your
+#'   sample size) to always bootstrap from the FULL sample instead of a
+#'   capped subsample. This matters in particular for categorical
+#'   predictors with rare levels: capping at a small \eqn{n^*} increases
+#'   the chance that a bootstrap draw or cross-validation fold ends up
+#'   with zero observations of some level, which causes
+#'   \code{predict()} to fail with an "has new levels" error when that
+#'   level does appear elsewhere. Raising (or removing) the cap reduces,
+#'   but does not entirely eliminate, this risk -- an extremely rare level
+#'   can still be excluded from a fold by chance even at the full sample
+#'   size.
 #' @param verbose Logical, default \code{TRUE}. If \code{TRUE}, prints
 #'   progress and results at each step (see Details). Set to \code{FALSE}
 #'   for silent operation.
@@ -303,6 +329,7 @@
 qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                       outcome_scale = c("log", "level"),
                                       tau = 10, B = 100, k_folds = 5, n_grid = 200,
+                                      subsample_cap = 5000,
                                       verbose = TRUE, plotting = FALSE) {
 
   outcome_scale <- match.arg(outcome_scale)
@@ -363,6 +390,13 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                  sum(target_na), paste(target_cols_needed, collapse = ", ")))
   }
 
+  # --- Input validation: donor/target categorical level consistency -------
+  # Checked once, upfront, on the ORIGINAL x_vars -- a level present in
+  # target but absent from donor would otherwise surface as a cryptic
+  # "has new levels" error deep inside the bootstrap/CV loops, potentially
+  # after substantial computation.
+  .check_factor_levels(donor_data, target_data, x_vars)
+
   # --- Input validation: outcome positivity under log scale ---------------
   if (outcome_scale == "log" && any(donor_data[[y_var]] <= 0)) {
     stop(sprintf("outcome_scale = 'log' requires strictly positive values of '%s' in donor_data, ",
@@ -385,6 +419,9 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   }
   if (!is.numeric(n_grid) || length(n_grid) != 1 || n_grid != round(n_grid) || n_grid < 4) {
     stop("n_grid must be a single integer of at least 4.")
+  }
+  if (!is.numeric(subsample_cap) || length(subsample_cap) != 1 || subsample_cap < 1) {
+    stop("subsample_cap must be a single positive number (use Inf for the full sample).")
   }
 
   # --- Input validation: plotting dependency ------------------------------
@@ -416,8 +453,8 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                      dimnames = list(active, z_vars, NULL))
     for (b in seq_len(B)) {
       if (verbose) cat(sprintf("\rBootstrap progress: %d/%d", b, B))
-      donor_sub  <- .draw_subsample(donor_data)
-      target_sub <- .draw_subsample(target_data)
+      donor_sub  <- .draw_subsample(donor_data, subsample_cap)
+      target_sub <- .draw_subsample(target_data, subsample_cap)
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
                                           active, outcome_scale)$S
     }
@@ -548,7 +585,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   # (paired resampling): this isolates variability due to the choice of
   # specification, rather than adding extra noise from independent draws
   # per candidate, and is also more efficient (B draws instead of B * n_candidates).
-  donor_subs_spec <- lapply(seq_len(B), function(b) .draw_subsample(donor_data))
+  donor_subs_spec <- lapply(seq_len(B), function(b) .draw_subsample(donor_data, subsample_cap))
 
   r2_boot <- matrix(NA_real_, nrow = B, ncol = n_candidates)
 

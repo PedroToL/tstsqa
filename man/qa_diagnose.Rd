@@ -15,6 +15,7 @@ qa_diagnose(
   B = 100,
   k_folds = 5,
   n_grid = 200,
+  subsample_cap = 5000,
   verbose = TRUE,
   plotting = FALSE
 )
@@ -26,7 +27,11 @@ columns.}
 
 \item{target_data}{Data frame containing the target sample. Must include
 all \code{x_vars} and \code{z_vars}, with no missing values in these
-columns.}
+columns. For any \code{x_vars} column that is a factor or character,
+every level present in \code{target_data} must also appear in
+\code{donor_data} (checked upfront and rejected with \code{stop()}
+otherwise); a level present in \code{donor_data} but absent from
+\code{target_data} triggers a \code{warning()} instead.}
 
 \item{y_var}{Character string naming the outcome column in
 \code{donor_data}. Must not also appear in \code{x_vars} or
@@ -59,6 +64,22 @@ Stage 2. Default 5.}
 
 \item{n_grid}{Passed through to the final \code{\link{qa_fit}}
 call; see its documentation.}
+
+\item{subsample_cap}{Upper limit on the size of each bootstrap/subsample
+draw: \eqn{n^* = \min(n, \code{subsample\_cap})}, drawn without
+replacement if the original sample exceeds this cap, with replacement
+(a classic bootstrap) otherwise. Default 5000, matching the paper's
+suggested default. Set to \code{Inf} (or any value at or above your
+sample size) to always bootstrap from the FULL sample instead of a
+capped subsample. This matters in particular for categorical
+predictors with rare levels: capping at a small \eqn{n^*} increases
+the chance that a bootstrap draw or cross-validation fold ends up
+with zero observations of some level, which causes
+\code{predict()} to fail with an "has new levels" error when that
+level does appear elsewhere. Raising (or removing) the cap reduces,
+but does not entirely eliminate, this risk -- an extremely rare level
+can still be excluded from a fold by chance even at the full sample
+size.}
 
 \item{verbose}{Logical, default \code{TRUE}. If \code{TRUE}, prints
 progress and results at each step (see Details). Set to \code{FALSE}
@@ -111,9 +132,10 @@ The function proceeds in two stages, followed by a final diagnostic:
 
 \strong{Stage 1 (Variable Selection).} Starting from the full candidate
 set \code{x_vars}, at each iteration \code{B} subsamples of size
-\eqn{n^* = \min(n, 5000)} are drawn independently from \code{donor_data}
-and \code{target_data} (without replacement if the original sample size
-exceeds 5000, with replacement -- i.e. a classic bootstrap -- otherwise).
+\eqn{n^* = \min(n, \code{subsample\_cap})} are drawn independently from
+\code{donor_data} and \code{target_data} (without replacement if the
+original sample size exceeds \code{subsample_cap}, with replacement --
+i.e. a classic bootstrap -- otherwise).
 On every subsample, the leave-one-out ratio
 \eqn{S_i(z_k) = \Delta R^2_{z_k,t} / \Delta R^2_{y,d}} is computed for
 every predictor \eqn{i} still in the active set and every external

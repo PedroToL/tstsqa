@@ -10,7 +10,7 @@ qa_fit(
   y_var,
   x_vars,
   outcome_scale = c("log", "level"),
-  n_grid = 200,
+  n_grid = 1000,
   donor_weights = NULL,
   plotting = FALSE,
   annotate_p = NULL
@@ -24,7 +24,13 @@ columns.}
 \item{target_data}{Data frame containing the target sample. Must include
 all \code{x_vars}, with no missing values in these columns. \code{y_var}
 is not required (and is not used) in \code{target_data}, since the
-outcome is by construction unobserved in the target sample.}
+outcome is by construction unobserved in the target sample. For any
+\code{x_vars} column that is a factor or character, every level present
+in \code{target_data} must also appear in \code{donor_data} (checked
+upfront and rejected with \code{stop()} otherwise, since a level never
+seen during fitting cannot be predicted); a level present in
+\code{donor_data} but absent from \code{target_data} triggers a
+\code{warning()} instead, since it does not prevent prediction.}
 
 \item{y_var}{Character string naming the outcome column in
 \code{donor_data}.}
@@ -63,7 +69,11 @@ Defaults to \code{NULL} (no annotation).}
 A list with components:
   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
   \item{donor_resid}{Donor in-sample residuals on the model scale.}
-  \item{eta_spline}{The fitted \code{smooth.spline} object for \eqn{\hat\eta(p)}.}
+  \item{eta_spline}{A callable function, \code{eta_spline(p)}, giving the
+    estimated quantile-gap value at position(s) \code{p}. Evaluates the
+    fitted smoothing spline within \eqn{[\min(p), \max(p)]} of the
+    estimation grid, and linearly extrapolates beyond it using the
+    spline's own boundary derivative (see Details).}
   \item{donor_ecdf}{A function giving the weighted empirical CDF of donor
     predicted values, used to assign target quantile positions.}
   \item{p_grid}{The interior quantile grid in \eqn{(0,1)} used to estimate
@@ -112,6 +122,17 @@ and the first-stage model family, not just a cosmetic transform:
     whatever scale the adjustment is applied on; exponentiating a
     log-scale additive adjustment does not preserve it in levels.
 }
+
+The estimation grid runs from \eqn{1/(n\_grid+1)} to
+\eqn{n\_grid/(n\_grid+1)}; a target observation whose predicted rank
+falls outside this range triggers a common-support warning (Section
+5.2) and its adjustment relies on extrapolation. That extrapolation is
+explicitly linear, continuing from the fitted spline's own value and
+first derivative at the nearest grid boundary, rather than relying on
+\code{smooth.spline}'s own extrapolation behavior beyond its fitted
+domain, which is not reproducible across smoothing-spline
+implementations. The default \code{n_grid = 1000} reaches the 99.9th
+percentile, so this affects only the most extreme observations.
 
 Weighting (via \code{donor_weights}) enters only through the empirical
 quantile estimates used to build \eqn{\hat\eta(p)}. It is the caller's

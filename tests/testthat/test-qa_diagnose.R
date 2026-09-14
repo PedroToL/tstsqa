@@ -162,6 +162,20 @@ test_that("non-positive y under log scale is rejected", {
                                           outcome_scale = "log"),
                "strictly positive")
 })
+test_that("subsample_cap controls the bootstrap draw size", {
+  d <- make_toy_data()
+  # Default (5000) should behave exactly as before for a small toy sample
+  # (n=5000, so n* = min(5000,5000) = 5000, i.e. no change vs prior tests).
+  # Just confirm the parameter is accepted and validated.
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"),
+                 subsample_cap = -1, verbose = FALSE),
+    "subsample_cap must be"
+  )
+  result <- suppressWarnings(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"),
+                                           B = 5, verbose = FALSE, subsample_cap = Inf))
+  expect_true(is.list(result))
+})
 
 # ---------------------------------------------------------------------------
 # Input validation: tau / B / k_folds / n_grid
@@ -192,6 +206,15 @@ test_that("small B triggers a warning but still runs", {
                                  B = 5, verbose = FALSE)
     ),
     "quite small"
+  )
+})
+test_that("target level absent from donor is rejected upfront (before any bootstrap)", {
+  d <- make_toy_data()
+  d$donor$region  <- factor(sample(c("A", "B"), nrow(d$donor), replace = TRUE))
+  d$target$region <- factor(sample(c("A", "B", "C"), nrow(d$target), replace = TRUE))  # "C" unseen by donor
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "region"), verbose = FALSE),
+    "not present in donor_data"
   )
 })
 
