@@ -31,7 +31,7 @@ test_that("the predictor that only explains z (not y) gets removed", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    outcome_scale = "log", tau = 10, B = 20, k_folds = 5, verbose = FALSE
+    outcome_scale = "log", tau = 10, B = 20, verbose = FALSE
   ))
 
   expect_false("X2" %in% result$selected_predictors)
@@ -43,15 +43,16 @@ test_that("output structure is internally consistent", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, k_folds = 5, verbose = FALSE
+    B = 20, verbose = FALSE
   ))
 
-  expect_true(all(result$selected_predictors %in% result$stage1_survivors))
-  expect_length(result$rho_star, 2)
-  expect_named(result$rho_star, c("z1", "z2"))
-  expect_equal(nrow(result$spec_search_results), 2^length(result$stage1_survivors) - 1)
-  expect_true(is.numeric(result$R2_y_donor_oos_mean))
-  expect_length(result$R2_y_donor_oos_ci, 2)
+  expect_true(all(c("X1", "X3") %in% result$selected_predictors))
+  expect_named(result$R2_y_donor, c("mean", "ci_lower", "ci_upper"))
+  expect_true(is.numeric(result$R2_y_donor$mean))
+  expect_named(result$rho_star, c("mean", "ci_lower", "ci_upper"))
+  expect_named(result$rho_star$mean, c("z1", "z2"))
+  expect_named(result$rho_star$ci_lower, c("z1", "z2"))
+  expect_named(result$rho_star$ci_upper, c("z1", "z2"))
 })
 
 test_that("verbose = TRUE prints the documented progress messages", {
@@ -59,7 +60,7 @@ test_that("verbose = TRUE prints the documented progress messages", {
   expect_output(
     suppressWarnings(qa_diagnose(
       d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-      B = 5, k_folds = 5, verbose = TRUE
+      B = 5, verbose = TRUE
     )),
     "Removing 'X2'"
   )
@@ -84,6 +85,16 @@ test_that("z_vars must still be numeric (factor z is rejected with a clear error
                  x_vars = c("X1", "X2", "X3"), B = 5, verbose = FALSE),
     "must be numeric"
   )
+})
+test_that("outcome_scale is printed as the very first line", {
+  d <- make_toy_data()
+  out <- capture.output(
+    suppressWarnings(qa_diagnose(
+      d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
+      B = 5, verbose = TRUE, outcome_scale = "log"
+    ))
+  )
+  expect_equal(out[1], "Outcome scale: log")
 })
 
 # ---------------------------------------------------------------------------
@@ -178,16 +189,14 @@ test_that("subsample_cap controls the bootstrap draw size", {
 })
 
 # ---------------------------------------------------------------------------
-# Input validation: tau / B / k_folds / n_grid
+# Input validation: tau / B / n_grid
 # ---------------------------------------------------------------------------
 
-test_that("tau, B, k_folds, n_grid validation fires", {
+test_that("tau, B, n_grid validation fires", {
   d <- make_toy_data()
   expect_error(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), tau = -1),
                "positive numeric")
   expect_error(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), B = 1),
-               "at least 2")
-  expect_error(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), k_folds = 1),
                "at least 2")
   expect_error(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), n_grid = 2),
                "at least 4")
@@ -217,11 +226,12 @@ test_that("target level absent from donor is rejected upfront (before any bootst
     "not present in donor_data"
   )
 })
-test_that("a rare factor level isolated into one CV fold does not crash the run", {
+test_that("a rare factor level unlucky in one bootstrap subsample does not crash the run", {
   set.seed(99)
   n <- 3000
   X1 <- rnorm(n)
-  # Rare level: only ~4 rows total, likely to end up isolated in one of 5 folds
+  # Rare level: only ~4 rows total, occasionally isolated entirely into
+  # donor or target by chance during a bootstrap draw in Final Estimation.
   region <- factor(sample(c("A", "B", "RARE"), n, replace = TRUE, prob = c(0.60, 0.399, 0.001)))
   y <- exp(1 + 0.5 * X1 + rnorm(n, sd = 0.8))
   z1 <- 0.4 * X1 + rnorm(n, sd = 0.5)
@@ -246,16 +256,27 @@ test_that("plotting = TRUE returns a ggplot object", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, k_folds = 5, verbose = FALSE, plotting = TRUE
+    B = 20, verbose = FALSE, plotting = TRUE
   ))
   expect_s3_class(result$S_plot, "ggplot")
+})
+
+test_that("S_plot has no error bars", {
+  skip_if_not_installed("ggplot2")
+  d <- make_toy_data()
+  result <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
+    B = 20, verbose = FALSE, plotting = TRUE
+  ))
+  layer_classes <- vapply(result$S_plot$layers, function(l) class(l$geom)[1], character(1))
+  expect_false("GeomErrorbar" %in% layer_classes)
 })
 
 test_that("plotting = FALSE returns NULL for S_plot", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, k_folds = 5, verbose = FALSE
+    B = 20, verbose = FALSE
   ))
   expect_null(result$S_plot)
 })

@@ -1,48 +1,43 @@
 # ============================================================================
-# qa_diagnose(): Single consolidated function implementing
-# Section 5.4 end-to-end:
+# qa_diagnose(): Variable selection and regime diagnostic implementing
+# Section 5.4's screening procedure, plus the regime diagnostic (Eq. 12):
 #
-#   VARIABLE SELECTION (Stage 1): for each candidate predictor set, starting
-#   from the full model, draw B subsamples of size n* = min(n, subsample_cap)
-#   from donor and target (independently; without replacement if n exceeds
-#   the cap, with replacement -- classic bootstrap -- otherwise), compute
+#   VARIABLE SELECTION: for each candidate predictor set, starting from the
+#   full model, draw B subsamples of size n* = min(n, subsample_cap) from
+#   donor and target (independently; without replacement if n exceeds the
+#   cap, with replacement -- classic bootstrap -- otherwise), compute
 #   S_i(z_k) (in-sample R^2 within each subsample) on every subsample, and
 #   average. If the bootstrap MEAN of any (i, z_k) pair exceeds tau, drop
 #   the predictor with the highest mean S and repeat on a fresh set of B
 #   subsamples for the reduced predictor set. Stop when no pair's mean S
-#   exceeds tau.
+#   exceeds tau. There is no further subset/specification search: all
+#   survivors of this screening are the final predictor set.
 #
-#   MODEL SELECTION (Stage 2): among the Stage 1 survivors, exhaustively
-#   search all non-empty subsets and pick the one maximising mean k-fold
-#   cross-validated R^2_{y,d}, bootstrapped over the SAME B subsamples
-#   (paired resampling; size n* = min(n_donor, subsample_cap) each), so a
-#   95% CI is available for the chosen specification's OOS R^2 alongside
-#   the point estimate.
-#
-#   Finally, fits the selected specification on the FULL data and reports
-#   rho* (Eq. 12) via qa_fit().
+#   FINAL ESTIMATION: using the fixed set of survivors, draw a fresh B
+#   subsamples and, on each, compute in-sample R^2_{y,d} and the regime
+#   diagnostic rho* (Eq. 12), giving a bootstrap mean and 95% CI for both
+#   rather than a single point estimate. A final qa_fit() call on the FULL
+#   data (not a subsample) is also returned, for the actual adjustment
+#   applied to the whole target sample.
 #
 # HARDENED -- current state:
 #   - Full input validation: types, required columns, numeric checks, no
 #     missing values, y_var/x_vars/z_vars non-overlapping and non-duplicated,
-#     outcome positivity under log scale, tau/B/k_folds/n_grid sanity checks.
+#     outcome positivity under log scale, tau/B/n_grid sanity checks.
 #   - delta_y_i == 0 (exact) is guarded to avoid NaN/undefined ratios; a
 #     tiny-but-nonzero delta_y_i is left as-is (correct, if extreme, paper
 #     behavior -- not a bug).
-#   - A warning (not an error) fires if Stage 1 survivors exceed 12, since
-#     Stage 2's exhaustive 2^m - 1 subset search becomes very expensive.
 #   - A warning fires if B < 10, since bootstrap means/CIs get unreliable.
+#   - Each Final Estimation bootstrap draw's qa_fit() call is tolerant of a
+#     donor/target level mismatch specific to that subsample (rare, but
+#     possible even when the full donor/target agree overall): that
+#     replicate's rho* is skipped (left NA) rather than crashing the run.
 #
 # Still-open limitations:
-#   - Stage 2 always does EXHAUSTIVE subset search; no non-exhaustive
-#     fallback (e.g. stepwise) for large survivor sets, only a warning.
-#   - Stage 2's B subsamples are drawn once and reused across all candidate
-#     specifications (paired resampling), not literally identical to
-#     Stage 1's per-iteration independent subsamples.
 #   - z_k ~ X regressions are always plain OLS (unweighted), regardless of
 #     outcome_scale, since z is not transformed anywhere in the paper.
-#   - Printing is unconditional on verbose = TRUE and not throttled for very
-#     large B or very large numbers of Stage 2 candidate specifications.
+#   - Printing is unconditional on verbose = TRUE and not throttled for
+#     very large B.
 # ============================================================================
 
 # NOTE: this file depends on qa_fit() (defined in
@@ -69,71 +64,7 @@
   list(model = mod, y_model = y_model, y_hat = y_hat, r2 = r2)
 }
 
-# --- Small internal helper: k-fold out-of-fold predictions -----------------
-# Tolerant of a fold's predict() call failing -- most commonly because a
-# categorical predictor has a level that, by chance, ended up entirely in
-# the held-out fold and never appeared in that fold's training data (R has
-# no coefficient for a level it never saw, so predict() errors with "has
-# new levels"). Rather than letting one unlucky random split crash the
-# whole procedure, the affected fold's predictions are left as NA (with a
-# warning), and excluded from the R^2 calculation downstream.
-.kfold_oof_predictions <- function(data, fit_fun, predict_fun, k_folds) {
-  n <- nrow(data)
-  folds <- sample(rep(seq_len(k_folds), length.out = n))
-  oof <- rep(NA_real_, n)
-  failed_folds <- integer(0)
-  for (k in seq_len(k_folds)) {
-    train <- data[folds != k, , drop = FALSE]
-    test  <- data[folds == k, , drop = FALSE]
-    mod_k <- fit_fun(train)
-    pred_k <- tryCatch(predict_fun(mod_k, test), error = function(e) NULL)
-    if (is.null(pred_k)) {
-      failed_folds <- c(failed_folds, k)
-    } else {
-      oof[folds == k] <- pred_k
-    }
-  }
-  if (length(failed_folds) > 0) {
-    warning(sprintf(
-      "%d of %d cross-validation fold(s) could not generate predictions ",
-      length(failed_folds), k_folds
-    ), "(most likely a categorical predictor with a level absent from that ",
-    "fold's training data). Affected observations were excluded from this R^2 estimate.")
-  }
-  oof
-}
 
-# --- Small internal helper: OOS R^2 for a given y ~ x_vars specification --
-.cv_r2_first_stage <- function(data, y_var, x_vars, outcome_scale, k_folds) {
-  fit_fun <- function(train_data) {
-    if (outcome_scale == "log") {
-      y_model_train <- log(train_data[[y_var]])
-      fit_data <- cbind(train_data, y_model_train)
-      f <- stats::reformulate(x_vars, response = "y_model_train")
-      stats::lm(f, data = fit_data)
-    } else {
-      y_model_train <- train_data[[y_var]]
-      fit_data <- cbind(train_data, y_model_train)
-      f <- stats::reformulate(x_vars, response = "y_model_train")
-      stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"))
-    }
-  }
-  predict_fun <- function(mod, test_data) {
-    if (outcome_scale == "log") {
-      stats::predict(mod, newdata = test_data)
-    } else {
-      stats::predict(mod, newdata = test_data, type = "response")
-    }
-  }
-  y_model <- if (outcome_scale == "log") log(data[[y_var]]) else data[[y_var]]
-  oof <- .kfold_oof_predictions(data, fit_fun, predict_fun, k_folds)
-  # Restrict both numerator and denominator to the same valid subset, so a
-  # partially-failed fold (see .kfold_oof_predictions) doesn't compare
-  # predicted variance on a subset against observed variance on everyone.
-  valid <- !is.na(oof)
-  if (sum(valid) < 2) return(NA_real_)  # not enough valid predictions to estimate R^2 at all
-  stats::var(oof[valid]) / stats::var(y_model[valid])
-}
 
 # --- Small internal helper: single-pass S_i(z_k) matrix, in-sample --------
 .compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale) {
@@ -205,9 +136,9 @@
 #' (Eq. 12) evaluated on the selected specification.
 #'
 #' @details
-#' The function proceeds in two stages, followed by a final diagnostic:
+#' The function proceeds in two phases:
 #'
-#' \strong{Stage 1 (Variable Selection).} Starting from the full candidate
+#' \strong{Variable Selection.} Starting from the full candidate
 #' set \code{x_vars}, at each iteration \code{B} subsamples of size
 #' \eqn{n^* = \min(n, \code{subsample\_cap})} are drawn independently from
 #' \code{donor_data} and \code{target_data} (without replacement if the
@@ -222,32 +153,26 @@
 #' predictor with the largest mean \eqn{S} is dropped and the process
 #' repeats on a fresh set of \code{B} subsamples for the reduced predictor
 #' set. Screening stops when no pair's mean \eqn{S} exceeds \code{tau} (or
-#' when only one predictor remains).
+#' when only one predictor remains). There is no further specification
+#' search: all survivors form the final predictor set directly.
 #'
-#' \strong{Stage 2 (Model Selection).} Among the Stage 1 survivors, every
-#' non-empty subset is treated as a candidate specification (\eqn{2^m - 1}
-#' candidates for \eqn{m} survivors). \code{B} subsamples of
-#' \code{donor_data} (same \eqn{n^*} and replacement rule as Stage 1) are
-#' drawn once and reused across all candidates (paired resampling, so
-#' variability reflects the choice of specification rather than independent
-#' sampling noise). For each candidate, \code{k_folds}-fold cross-validated
-#' \eqn{R^2_{y,d}} is computed on every subsample; the specification with the
-#' highest mean cross-validated \eqn{R^2} is selected.
-#'
-#' \strong{Final diagnostic.} The selected specification is fit once on the
-#' full \code{donor_data}/\code{target_data} (not a subsample), and
-#' \code{\link{qa_fit}} is called to obtain the realised
-#' quantile-gap adjustment \eqn{\tilde\eta_t}, from which \eqn{\rho^*} (the
-#' residual correlation at which the adjustment would exactly recover the
-#' omitted covariance) is computed for each \code{z_vars} entry.
+#' \strong{Final Estimation.} Using the fixed set of survivors, a fresh
+#' \code{B} subsamples are drawn (same rule as above) and, on each, both
+#' in-sample \eqn{R^2_{y,d}} and the regime diagnostic \eqn{\rho^*} (Eq. 12)
+#' are computed -- the latter via a \code{\link{qa_fit}} call on that
+#' subsample, from which the realised quantile-gap adjustment
+#' \eqn{\tilde\eta_t} is obtained. Both are reported as a bootstrap mean and
+#' 95\% CI rather than a single point estimate. Finally, \code{\link{qa_fit}}
+#' is called once more on the FULL data (not a subsample), giving the actual
+#' adjustment applied to the whole target sample.
 #'
 #' When \code{verbose = TRUE} (the default), progress and results are
-#' printed at each step: active predictors and bootstrap progress per
-#' iteration, a message whenever a predictor is dropped, the top 5
-#' \eqn{S_i(z_k)} pairs (mean and 95\% CI) per iteration, a convergence
-#' message, the number of Stage 2 candidates and their evaluation progress,
-#' the top 5 specifications by mean cross-validated \eqn{R^2} (with 95\%
-#' CI), the selected specification, and the final \eqn{\rho^*} values.
+#' printed at each step: active predictors and bootstrap progress
+#' (with percentage and ETA) per Variable Selection iteration, a message
+#' whenever a predictor is dropped, the top 5 \eqn{S_i(z_k)} pairs (mean
+#' and 95\% CI) per iteration, a convergence message, then Final
+#' Estimation's own bootstrap progress and the resulting \eqn{R^2_{y,d}}
+#' and \eqn{\rho^*} (mean and 95\% CI).
 #'
 #' @param donor_data Data frame containing the donor sample. Must include
 #'   \code{y_var} and all \code{x_vars}, with no missing values in these
@@ -269,19 +194,16 @@
 #'   present in both \code{donor_data} and \code{target_data}.
 #' @param outcome_scale Either \code{"log"} or \code{"level"}; see
 #'   \code{\link{qa_fit}} for the distinction. Governs both the
-#'   donor-side \eqn{R^2_{y,d}} regressions (Stages 1 and 2) and the final
-#'   \code{qa_fit} call.
-#' @param tau Numeric threshold for Stage 1 screening: a predictor is
+#'   donor-side \eqn{R^2_{y,d}} regressions and every \code{qa_fit} call.
+#' @param tau Numeric threshold for screening: a predictor is
 #'   dropped when the bootstrap mean of any \eqn{S_i(z_k)} exceeds
 #'   \code{tau}. Default 10, per the paper's suggested default (\code{tau =
 #'   5} is more conservative).
-#' @param B Number of bootstrap subsamples drawn at each Stage 1 iteration
-#'   and reused across all Stage 2 candidates. Default 100. Must be at
-#'   least 2; values below 10 trigger a warning, since bootstrap means and
-#'   95\% CIs become unreliable with very few replications.
-#' @param k_folds Number of folds used for the cross-validated \eqn{R^2} in
-#'   Stage 2. Default 5.
-#' @param n_grid Passed through to the final \code{\link{qa_fit}}
+#' @param B Number of bootstrap subsamples drawn at each Variable Selection
+#'   iteration, and again (fresh) for Final Estimation. Default 100. Must
+#'   be at least 2; values below 10 trigger a warning, since bootstrap
+#'   means and 95\% CIs become unreliable with very few replications.
+#' @param n_grid Passed through to every \code{\link{qa_fit}}
 #'   call; see its documentation.
 #' @param subsample_cap Upper limit on the size of each bootstrap/subsample
 #'   draw: \eqn{n^* = \min(n, \code{subsample\_cap})}, drawn without
@@ -302,35 +224,29 @@
 #'   progress and results at each step (see Details). Set to \code{FALSE}
 #'   for silent operation.
 #' @param plotting Logical, default \code{FALSE}. If \code{TRUE}, builds a
-#'   \code{ggplot2} horizontal bar chart of the final Stage 1 \eqn{S_i(z_k)}
-#'   values (mean and 95\% CI error bars) for the surviving predictors,
-#'   with reference lines at \eqn{\tau = 5} and \eqn{\tau = 10}, returned as
-#'   \code{S_plot}. Requires the \code{ggplot2} package to be installed;
-#'   listed under \code{Suggests} rather than \code{Imports} so it is not a
-#'   hard dependency for users who never request a plot.
+#'   \code{ggplot2} horizontal bar chart of the final \eqn{S_i(z_k)} mean
+#'   values for the surviving predictors, with reference lines at
+#'   \eqn{\tau = 5} and \eqn{\tau = 10}, returned as \code{S_plot}. Requires
+#'   the \code{ggplot2} package to be installed; listed under
+#'   \code{Suggests} rather than \code{Imports} so it is not a hard
+#'   dependency for users who never request a plot.
 #'
 #' @return A list with components:
-#'   \item{selected_predictors}{Character vector of predictors in the final
-#'     specification, after both Stage 1 screening and Stage 2 model
-#'     selection.}
-#'   \item{stage1_survivors}{Character vector of predictors that survived
-#'     Stage 1 screening, before the Stage 2 subset search (may differ from
-#'     \code{selected_predictors} if a strict subset of the survivors fits
-#'     \code{y} better).}
-#'   \item{removed_predictors}{A list of removal events from Stage 1, each
-#'     with the iteration number, the removed predictor, the \code{z_var}
-#'     that triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at
-#'     the time of removal.}
-#'   \item{spec_search_results}{Data frame of every Stage 2 candidate
-#'     specification with its mean cross-validated \eqn{R^2} and 95\% CI.}
-#'   \item{R2_y_donor_oos_mean}{Mean cross-validated \eqn{R^2_{y,d}} of the
-#'     selected specification.}
-#'   \item{R2_y_donor_oos_ci}{Named vector \code{c(lower, upper)}: the 95\%
-#'     CI of the selected specification's cross-validated \eqn{R^2_{y,d}}.}
-#'   \item{rho_star}{Named vector, one entry per \code{z_vars}, of the
-#'     regime diagnostic \eqn{\rho^*} for the selected specification.}
+#'   \item{selected_predictors}{Character vector of predictors that
+#'     survived Variable Selection; the final predictor set.}
+#'   \item{removed_predictors}{A list of removal events, each with the
+#'     iteration number, the removed predictor, the \code{z_var} that
+#'     triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at the
+#'     time of removal.}
+#'   \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
+#'     \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
+#'     final predictor set.}
+#'   \item{rho_star}{A list with \code{mean}, \code{ci_lower}, and
+#'     \code{ci_upper}, each a named vector (one entry per \code{z_vars}):
+#'     the bootstrapped regime diagnostic \eqn{\rho^*}.}
 #'   \item{qa_fit}{The full return value of the
-#'     \code{\link{qa_fit}} call on the selected specification.}
+#'     \code{\link{qa_fit}} call on the final predictor set, fit on the
+#'     full (non-subsampled) data.}
 #'   \item{S_plot}{A \code{ggplot} object (see \code{plotting} above), or
 #'     \code{NULL} if \code{plotting = FALSE}.}
 #'
@@ -353,7 +269,7 @@
 #' @export
 qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                       outcome_scale = c("log", "level"),
-                                      tau = 10, B = 100, k_folds = 5, n_grid = 200,
+                                      tau = 10, B = 100, n_grid = 200,
                                       subsample_cap = 5000,
                                       verbose = TRUE, plotting = FALSE) {
 
@@ -428,7 +344,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                  y_var), "but non-positive values were found. Use outcome_scale = 'level' instead.")
   }
 
-  # --- Input validation: tau, B, k_folds, n_grid ---------------------------
+  # --- Input validation: tau, B, n_grid ------------------------------------
   if (!is.numeric(tau) || length(tau) != 1 || tau <= 0) {
     stop("tau must be a single positive numeric value.")
   }
@@ -438,9 +354,6 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   if (B < 10) {
     warning(sprintf("B = %d is quite small; bootstrap means and 95%% CIs may be unreliable. ",
                      B), "Consider B >= 100 for stable results.")
-  }
-  if (!is.numeric(k_folds) || length(k_folds) != 1 || k_folds != round(k_folds) || k_folds < 2) {
-    stop("k_folds must be a single integer of at least 2.")
   }
   if (!is.numeric(n_grid) || length(n_grid) != 1 || n_grid != round(n_grid) || n_grid < 4) {
     stop("n_grid must be a single integer of at least 4.")
@@ -462,7 +375,10 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   # ==========================================================================
   # VARIABLE SELECTION (Stage 1)
   # ==========================================================================
-  if (verbose) cat("========== Variable Selection ==========\n")
+  if (verbose) {
+    cat(sprintf("Outcome scale: %s\n", outcome_scale))
+    cat("========== Variable Selection ==========\n")
+  }
 
   repeat {
     iteration <- iteration + 1
@@ -547,18 +463,16 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     cat(sprintf("\nStage 1 survivors: %s\n", paste(active, collapse = ", ")))
   }
 
-  # --- Optional: bar plot of the FINAL Stage 1 S_i(z_k), mean + 95% CI ----
-  # Uses S_mean/S_ci_lower/S_ci_upper exactly as computed on the last loop
-  # iteration -- these already correspond to `active` (== stage1 survivors),
-  # since the loop breaks without recomputing them further.
+  # --- Optional: bar plot of the FINAL Stage 1 S_i(z_k), mean only --------
+  # Uses S_mean exactly as computed on the last loop iteration -- this
+  # already corresponds to `active` (== the final survivors), since the
+  # loop breaks without recomputing it further.
   S_plot <- NULL
   if (isTRUE(plotting)) {
     plot_df <- data.frame(
       predictor = rep(active, times = length(z_vars)),
       z_var     = rep(z_vars, each  = length(active)),
-      mean_S    = as.vector(S_mean),
-      ci_lower  = as.vector(S_ci_lower),
-      ci_upper  = as.vector(S_ci_upper)
+      mean_S    = as.vector(S_mean)
     )
     plot_df$label <- paste0(plot_df$z_var, "\n", plot_df$predictor)
 
@@ -569,8 +483,6 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     S_plot <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$label, y = .data$mean_S,
                                                      fill = .data$z_var)) +
       ggplot2::geom_col(width = 0.65) +
-      ggplot2::geom_errorbar(ggplot2::aes(ymin = .data$ci_lower, ymax = .data$ci_upper),
-                              width = 0.2, color = "gray30", linewidth = 0.5) +
       ggplot2::coord_flip() +
       ggplot2::geom_hline(yintercept = c(5, 10), linetype = "dashed", color = "gray50") +
       ggplot2::annotate("text", x = 0.6, y = 5,  label = "tau = 5",  vjust = -0.5,
@@ -588,132 +500,91 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   }
 
   # ==========================================================================
-  # MODEL SELECTION (Stage 2)
+  # FINAL ESTIMATION: bootstrap R^2_{y,d} and rho* for the final predictors
   # ==========================================================================
-  if (verbose) cat("\n========== Model Selection ==========\n")
+  if (verbose) cat("\n========== Final Estimation ==========\n")
 
-  if (length(active) > 12) {
-    warning(sprintf(
-      "%d predictors survived Stage 1 screening, giving 2^%d - 1 = %d candidate ",
-      length(active), length(active), 2^length(active) - 1
-    ), "specifications for Stage 2's exhaustive search. This may be very slow. ",
-    "Consider a stricter tau in Stage 1, or a non-exhaustive search strategy.")
-  }
+  r2_boot  <- rep(NA_real_, B)
+  rho_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
+  final_start_time <- Sys.time()
 
-  candidate_subsets <- unlist(
-    lapply(seq_along(active), function(k) utils::combn(active, k, simplify = FALSE)),
-    recursive = FALSE
-  )
-  n_candidates <- length(candidate_subsets)
-
-  # (a) Number of models to test
-  if (verbose) {
-    cat(sprintf("Testing %d candidate specification(s) via %d-fold CV, bootstrapped over %d subsamples.\n",
-                n_candidates, k_folds, B))
-  }
-
-  # Draw the B subsamples ONCE and reuse them for every candidate specification
-  # (paired resampling): this isolates variability due to the choice of
-  # specification, rather than adding extra noise from independent draws
-  # per candidate, and is also more efficient (B draws instead of B * n_candidates).
-  donor_subs_spec <- lapply(seq_len(B), function(b) .draw_subsample(donor_data, subsample_cap))
-
-  r2_boot <- matrix(NA_real_, nrow = B, ncol = n_candidates)
-  total_units <- n_candidates * B
-  spec_start_time <- Sys.time()
-
-  for (idx in seq_len(n_candidates)) {
-    for (b in seq_len(B)) {
-      # (b) Progress
-      current_unit <- (idx - 1) * B + b
-      if (verbose) {
-        elapsed <- as.numeric(difftime(Sys.time(), spec_start_time, units = "secs"))
-        eta <- if (current_unit > 1) {
-          elapsed / (current_unit - 1) * (total_units - (current_unit - 1))
-        } else NA
-        .print_progress(sprintf(
-          "Model %d/%d - Bootstrap %d/%d (%.0f%% overall) - ETA: %s",
-          idx, n_candidates, b, B, 100 * current_unit / total_units, .format_duration(eta)
-        ))
-      }
-      r2_boot[b, idx] <- .cv_r2_first_stage(donor_subs_spec[[b]], y_var,
-                                             candidate_subsets[[idx]],
-                                             outcome_scale, k_folds)
+  for (b in seq_len(B)) {
+    if (verbose) {
+      elapsed <- as.numeric(difftime(Sys.time(), final_start_time, units = "secs"))
+      eta <- if (b > 1) elapsed / (b - 1) * (B - (b - 1)) else NA
+      .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
+                               b, B, 100 * b / B, .format_duration(eta)))
     }
-    gc(verbose = FALSE)  # modest housekeeping between models, not expected to be the main
-                         # lever on speed -- the slowdown with larger subsets is primarily
-                         # the genuine cost of wider design matrices (see qa_diagnose() Details)
+
+    donor_sub  <- .draw_subsample(donor_data, subsample_cap)
+    target_sub <- .draw_subsample(target_data, subsample_cap)
+
+    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale)
+    r2_boot[b] <- fit_sub$r2
+    eps_d_sub  <- fit_sub$y_model - fit_sub$y_hat
+
+    z_perp_sub <- sapply(z_vars, function(z_k) {
+      f_z <- stats::reformulate(active, response = z_k)
+      mod_z <- stats::lm(f_z, data = target_sub)
+      stats::residuals(mod_z)
+    })
+    colnames(z_perp_sub) <- z_vars
+
+    # This subsample's donor/target could, by chance, have a level mismatch
+    # even when the FULL donor/target agree overall (checked upfront via
+    # .check_factor_levels) -- tolerate that here by skipping this
+    # replicate's rho* (left NA) rather than crashing the whole run.
+    qa_sub <- tryCatch(
+      qa_fit(donor_sub, target_sub, y_var, active, outcome_scale = outcome_scale, n_grid = n_grid),
+      error = function(e) NULL
+    )
+    if (is.null(qa_sub)) next
+    eta_sub <- qa_sub$eta_target
+
+    rho_boot[b, ] <- sapply(z_vars, function(z_k) {
+      stats::cov(eta_sub, target_sub[[z_k]]) /
+        (stats::sd(eps_d_sub) * stats::sd(z_perp_sub[, z_k]))
+    })
   }
   if (verbose) cat("\n")
 
-  r2_mean     <- colMeans(r2_boot, na.rm = TRUE)
-  r2_ci_lower <- apply(r2_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE)
-  r2_ci_upper <- apply(r2_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE)
-
-  spec_results <- data.frame(
-    specification = vapply(candidate_subsets, paste, collapse = " + ", FUN.VALUE = character(1)),
-    mean_r2_oos   = r2_mean,
-    ci_lower      = r2_ci_lower,
-    ci_upper      = r2_ci_upper
+  R2_y_donor <- list(
+    mean     = mean(r2_boot, na.rm = TRUE),
+    ci_lower = unname(stats::quantile(r2_boot, 0.025, na.rm = TRUE)),
+    ci_upper = unname(stats::quantile(r2_boot, 0.975, na.rm = TRUE))
   )
 
-  # (c) Table with top 5 OOS R^2
-  spec_results_sorted <- spec_results[order(-spec_results$mean_r2_oos), ]
-  rownames(spec_results_sorted) <- NULL
+  rho_star <- list(
+    mean     = colMeans(rho_boot, na.rm = TRUE),
+    ci_lower = apply(rho_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+    ci_upper = apply(rho_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE)
+  )
+
   if (verbose) {
-    cat("Top", min(5, nrow(spec_results_sorted)), "specifications by mean OOS R^2 (95% CI):\n")
-    print(utils::head(spec_results_sorted, 5), row.names = FALSE)
-  }
-
-  best_idx <- which.max(spec_results$mean_r2_oos)
-  final_predictors <- candidate_subsets[[best_idx]]
-
-  # (d) Selected Model
-  if (verbose) {
-    cat(sprintf("\nSelected model: %s (mean OOS R^2 = %.4f, 95%% CI [%.4f, %.4f])\n",
-                paste(final_predictors, collapse = ", "), spec_results$mean_r2_oos[best_idx],
-                spec_results$ci_lower[best_idx], spec_results$ci_upper[best_idx]))
-  }
-
-  # ==========================================================================
-  # Final fit on the FULL data, using the Stage-2-selected specification
-  # ==========================================================================
-  fit_y_final <- .fit_first_stage_r2(donor_data, y_var, final_predictors, outcome_scale)
-  eps_d <- fit_y_final$y_model - fit_y_final$y_hat
-
-  z_perp_t <- sapply(z_vars, function(z_k) {
-    f_z <- stats::reformulate(final_predictors, response = z_k)
-    mod_z <- stats::lm(f_z, data = target_data)
-    stats::residuals(mod_z)
-  })
-  colnames(z_perp_t) <- z_vars
-
-  qa_result <- qa_fit(donor_data, target_data, y_var, final_predictors,
-                                    outcome_scale = outcome_scale, n_grid = n_grid)
-  eta_t <- qa_result$eta_target
-
-  rho_star <- sapply(z_vars, function(z_k) {
-    stats::cov(eta_t, target_data[[z_k]]) /
-      (stats::sd(eps_d) * stats::sd(z_perp_t[, z_k]))
-  })
-  names(rho_star) <- z_vars
-
-  # (e) rho*
-  if (verbose) {
+    cat(sprintf("R^2_y,d: mean = %.4f, 95%% CI [%.4f, %.4f]\n",
+                R2_y_donor$mean, R2_y_donor$ci_lower, R2_y_donor$ci_upper))
     cat("\nrho*:\n")
-    print(round(rho_star, 4))
+    rho_table <- data.frame(
+      z_var    = z_vars,
+      mean     = round(rho_star$mean, 4),
+      ci_lower = round(rho_star$ci_lower, 4),
+      ci_upper = round(rho_star$ci_upper, 4)
+    )
+    print(rho_table, row.names = FALSE)
   }
+
+  # ==========================================================================
+  # Final fit on the FULL data, using the selected specification
+  # ==========================================================================
+  qa_result <- qa_fit(donor_data, target_data, y_var, active,
+                       outcome_scale = outcome_scale, n_grid = n_grid)
 
   list(
-    selected_predictors = final_predictors,   # after BOTH stages
-    stage1_survivors    = active,             # survivors of S-screening, before spec search
+    selected_predictors = active,
     removed_predictors  = removal_log,
-    spec_search_results = spec_results,
-    R2_y_donor_oos_mean = spec_results$mean_r2_oos[best_idx],
-    R2_y_donor_oos_ci   = c(lower = spec_results$ci_lower[best_idx],
-                            upper = spec_results$ci_upper[best_idx]),
+    R2_y_donor          = R2_y_donor,
     rho_star            = rho_star,
-    qa_fit = qa_result,
+    qa_fit              = qa_result,
     S_plot              = S_plot
   )
 }

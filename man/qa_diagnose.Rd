@@ -13,7 +13,6 @@ qa_diagnose(
   outcome_scale = c("log", "level"),
   tau = 10,
   B = 100,
-  k_folds = 5,
   n_grid = 200,
   subsample_cap = 5000,
   verbose = TRUE,
@@ -46,23 +45,19 @@ present in both \code{donor_data} and \code{target_data}.}
 
 \item{outcome_scale}{Either \code{"log"} or \code{"level"}; see
 \code{\link{qa_fit}} for the distinction. Governs both the
-donor-side \eqn{R^2_{y,d}} regressions (Stages 1 and 2) and the final
-\code{qa_fit} call.}
+donor-side \eqn{R^2_{y,d}} regressions and every \code{qa_fit} call.}
 
-\item{tau}{Numeric threshold for Stage 1 screening: a predictor is
+\item{tau}{Numeric threshold for screening: a predictor is
 dropped when the bootstrap mean of any \eqn{S_i(z_k)} exceeds
 \code{tau}. Default 10, per the paper's suggested default (\code{tau =
 5} is more conservative).}
 
-\item{B}{Number of bootstrap subsamples drawn at each Stage 1 iteration
-and reused across all Stage 2 candidates. Default 100. Must be at
-least 2; values below 10 trigger a warning, since bootstrap means and
-95\% CIs become unreliable with very few replications.}
+\item{B}{Number of bootstrap subsamples drawn at each Variable Selection
+iteration, and again (fresh) for Final Estimation. Default 100. Must
+be at least 2; values below 10 trigger a warning, since bootstrap
+means and 95\% CIs become unreliable with very few replications.}
 
-\item{k_folds}{Number of folds used for the cross-validated \eqn{R^2} in
-Stage 2. Default 5.}
-
-\item{n_grid}{Passed through to the final \code{\link{qa_fit}}
+\item{n_grid}{Passed through to every \code{\link{qa_fit}}
 call; see its documentation.}
 
 \item{subsample_cap}{Upper limit on the size of each bootstrap/subsample
@@ -86,36 +81,30 @@ progress and results at each step (see Details). Set to \code{FALSE}
 for silent operation.}
 
 \item{plotting}{Logical, default \code{FALSE}. If \code{TRUE}, builds a
-\code{ggplot2} horizontal bar chart of the final Stage 1 \eqn{S_i(z_k)}
-values (mean and 95\% CI error bars) for the surviving predictors,
-with reference lines at \eqn{\tau = 5} and \eqn{\tau = 10}, returned as
-\code{S_plot}. Requires the \code{ggplot2} package to be installed;
-listed under \code{Suggests} rather than \code{Imports} so it is not a
-hard dependency for users who never request a plot.}
+\code{ggplot2} horizontal bar chart of the final \eqn{S_i(z_k)} mean
+values for the surviving predictors, with reference lines at
+\eqn{\tau = 5} and \eqn{\tau = 10}, returned as \code{S_plot}. Requires
+the \code{ggplot2} package to be installed; listed under
+\code{Suggests} rather than \code{Imports} so it is not a hard
+dependency for users who never request a plot.}
 }
 \value{
 A list with components:
-  \item{selected_predictors}{Character vector of predictors in the final
-    specification, after both Stage 1 screening and Stage 2 model
-    selection.}
-  \item{stage1_survivors}{Character vector of predictors that survived
-    Stage 1 screening, before the Stage 2 subset search (may differ from
-    \code{selected_predictors} if a strict subset of the survivors fits
-    \code{y} better).}
-  \item{removed_predictors}{A list of removal events from Stage 1, each
-    with the iteration number, the removed predictor, the \code{z_var}
-    that triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at
-    the time of removal.}
-  \item{spec_search_results}{Data frame of every Stage 2 candidate
-    specification with its mean cross-validated \eqn{R^2} and 95\% CI.}
-  \item{R2_y_donor_oos_mean}{Mean cross-validated \eqn{R^2_{y,d}} of the
-    selected specification.}
-  \item{R2_y_donor_oos_ci}{Named vector \code{c(lower, upper)}: the 95\%
-    CI of the selected specification's cross-validated \eqn{R^2_{y,d}}.}
-  \item{rho_star}{Named vector, one entry per \code{z_vars}, of the
-    regime diagnostic \eqn{\rho^*} for the selected specification.}
+  \item{selected_predictors}{Character vector of predictors that
+    survived Variable Selection; the final predictor set.}
+  \item{removed_predictors}{A list of removal events, each with the
+    iteration number, the removed predictor, the \code{z_var} that
+    triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at the
+    time of removal.}
+  \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
+    \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
+    final predictor set.}
+  \item{rho_star}{A list with \code{mean}, \code{ci_lower}, and
+    \code{ci_upper}, each a named vector (one entry per \code{z_vars}):
+    the bootstrapped regime diagnostic \eqn{\rho^*}.}
   \item{qa_fit}{The full return value of the
-    \code{\link{qa_fit}} call on the selected specification.}
+    \code{\link{qa_fit}} call on the final predictor set, fit on the
+    full (non-subsampled) data.}
   \item{S_plot}{A \code{ggplot} object (see \code{plotting} above), or
     \code{NULL} if \code{plotting = FALSE}.}
 }
@@ -128,9 +117,9 @@ best first-stage specification, and the regime diagnostic \eqn{\rho^*}
 (Eq. 12) evaluated on the selected specification.
 }
 \details{
-The function proceeds in two stages, followed by a final diagnostic:
+The function proceeds in two phases:
 
-\strong{Stage 1 (Variable Selection).} Starting from the full candidate
+\strong{Variable Selection.} Starting from the full candidate
 set \code{x_vars}, at each iteration \code{B} subsamples of size
 \eqn{n^* = \min(n, \code{subsample\_cap})} are drawn independently from
 \code{donor_data} and \code{target_data} (without replacement if the
@@ -145,32 +134,26 @@ bootstrap \emph{mean} of any \eqn{(i, z_k)} pair exceeds \code{tau}, the
 predictor with the largest mean \eqn{S} is dropped and the process
 repeats on a fresh set of \code{B} subsamples for the reduced predictor
 set. Screening stops when no pair's mean \eqn{S} exceeds \code{tau} (or
-when only one predictor remains).
+when only one predictor remains). There is no further specification
+search: all survivors form the final predictor set directly.
 
-\strong{Stage 2 (Model Selection).} Among the Stage 1 survivors, every
-non-empty subset is treated as a candidate specification (\eqn{2^m - 1}
-candidates for \eqn{m} survivors). \code{B} subsamples of
-\code{donor_data} (same \eqn{n^*} and replacement rule as Stage 1) are
-drawn once and reused across all candidates (paired resampling, so
-variability reflects the choice of specification rather than independent
-sampling noise). For each candidate, \code{k_folds}-fold cross-validated
-\eqn{R^2_{y,d}} is computed on every subsample; the specification with the
-highest mean cross-validated \eqn{R^2} is selected.
-
-\strong{Final diagnostic.} The selected specification is fit once on the
-full \code{donor_data}/\code{target_data} (not a subsample), and
-\code{\link{qa_fit}} is called to obtain the realised
-quantile-gap adjustment \eqn{\tilde\eta_t}, from which \eqn{\rho^*} (the
-residual correlation at which the adjustment would exactly recover the
-omitted covariance) is computed for each \code{z_vars} entry.
+\strong{Final Estimation.} Using the fixed set of survivors, a fresh
+\code{B} subsamples are drawn (same rule as above) and, on each, both
+in-sample \eqn{R^2_{y,d}} and the regime diagnostic \eqn{\rho^*} (Eq. 12)
+are computed -- the latter via a \code{\link{qa_fit}} call on that
+subsample, from which the realised quantile-gap adjustment
+\eqn{\tilde\eta_t} is obtained. Both are reported as a bootstrap mean and
+95\% CI rather than a single point estimate. Finally, \code{\link{qa_fit}}
+is called once more on the FULL data (not a subsample), giving the actual
+adjustment applied to the whole target sample.
 
 When \code{verbose = TRUE} (the default), progress and results are
-printed at each step: active predictors and bootstrap progress per
-iteration, a message whenever a predictor is dropped, the top 5
-\eqn{S_i(z_k)} pairs (mean and 95\% CI) per iteration, a convergence
-message, the number of Stage 2 candidates and their evaluation progress,
-the top 5 specifications by mean cross-validated \eqn{R^2} (with 95\%
-CI), the selected specification, and the final \eqn{\rho^*} values.
+printed at each step: active predictors and bootstrap progress
+(with percentage and ETA) per Variable Selection iteration, a message
+whenever a predictor is dropped, the top 5 \eqn{S_i(z_k)} pairs (mean
+and 95\% CI) per iteration, a convergence message, then Final
+Estimation's own bootstrap progress and the resulting \eqn{R^2_{y,d}}
+and \eqn{\rho^*} (mean and 95\% CI).
 }
 \examples{
 \dontrun{
