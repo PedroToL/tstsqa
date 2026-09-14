@@ -70,15 +70,35 @@
 }
 
 # --- Small internal helper: k-fold out-of-fold predictions -----------------
+# Tolerant of a fold's predict() call failing -- most commonly because a
+# categorical predictor has a level that, by chance, ended up entirely in
+# the held-out fold and never appeared in that fold's training data (R has
+# no coefficient for a level it never saw, so predict() errors with "has
+# new levels"). Rather than letting one unlucky random split crash the
+# whole procedure, the affected fold's predictions are left as NA (with a
+# warning), and excluded from the R^2 calculation downstream.
 .kfold_oof_predictions <- function(data, fit_fun, predict_fun, k_folds) {
   n <- nrow(data)
   folds <- sample(rep(seq_len(k_folds), length.out = n))
-  oof <- numeric(n)
+  oof <- rep(NA_real_, n)
+  failed_folds <- integer(0)
   for (k in seq_len(k_folds)) {
     train <- data[folds != k, , drop = FALSE]
     test  <- data[folds == k, , drop = FALSE]
     mod_k <- fit_fun(train)
-    oof[folds == k] <- predict_fun(mod_k, test)
+    pred_k <- tryCatch(predict_fun(mod_k, test), error = function(e) NULL)
+    if (is.null(pred_k)) {
+      failed_folds <- c(failed_folds, k)
+    } else {
+      oof[folds == k] <- pred_k
+    }
+  }
+  if (length(failed_folds) > 0) {
+    warning(sprintf(
+      "%d of %d cross-validation fold(s) could not generate predictions ",
+      length(failed_folds), k_folds
+    ), "(most likely a categorical predictor with a level absent from that ",
+    "fold's training data). Affected observations were excluded from this R^2 estimate.")
   }
   oof
 }
@@ -107,7 +127,12 @@
   }
   y_model <- if (outcome_scale == "log") log(data[[y_var]]) else data[[y_var]]
   oof <- .kfold_oof_predictions(data, fit_fun, predict_fun, k_folds)
-  stats::var(oof) / stats::var(y_model)
+  # Restrict both numerator and denominator to the same valid subset, so a
+  # partially-failed fold (see .kfold_oof_predictions) doesn't compare
+  # predicted variance on a subset against observed variance on everyone.
+  valid <- !is.na(oof)
+  if (sum(valid) < 2) return(NA_real_)  # not enough valid predictions to estimate R^2 at all
+  stats::var(oof[valid]) / stats::var(y_model[valid])
 }
 
 # --- Small internal helper: single-pass S_i(z_k) matrix, in-sample --------
@@ -451,8 +476,14 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     # (b) Bootstrap progress
     S_boot <- array(NA_real_, dim = c(length(active), length(z_vars), B),
                      dimnames = list(active, z_vars, NULL))
+    boot_start_time <- Sys.time()
     for (b in seq_len(B)) {
-      if (verbose) cat(sprintf("\rBootstrap progress: %d/%d", b, B))
+      if (verbose) {
+        elapsed <- as.numeric(difftime(Sys.time(), boot_start_time, units = "secs"))
+        eta <- if (b > 1) elapsed / (b - 1) * (B - (b - 1)) else NA
+        .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
+                                 b, B, 100 * b / B, .format_duration(eta)))
+      }
       donor_sub  <- .draw_subsample(donor_data, subsample_cap)
       target_sub <- .draw_subsample(target_data, subsample_cap)
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
@@ -588,15 +619,30 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   donor_subs_spec <- lapply(seq_len(B), function(b) .draw_subsample(donor_data, subsample_cap))
 
   r2_boot <- matrix(NA_real_, nrow = B, ncol = n_candidates)
+  total_units <- n_candidates * B
+  spec_start_time <- Sys.time()
 
   for (idx in seq_len(n_candidates)) {
     for (b in seq_len(B)) {
       # (b) Progress
-      if (verbose) cat(sprintf("\rModel %d/%d - Bootstrap %d/%d", idx, n_candidates, b, B))
+      current_unit <- (idx - 1) * B + b
+      if (verbose) {
+        elapsed <- as.numeric(difftime(Sys.time(), spec_start_time, units = "secs"))
+        eta <- if (current_unit > 1) {
+          elapsed / (current_unit - 1) * (total_units - (current_unit - 1))
+        } else NA
+        .print_progress(sprintf(
+          "Model %d/%d - Bootstrap %d/%d (%.0f%% overall) - ETA: %s",
+          idx, n_candidates, b, B, 100 * current_unit / total_units, .format_duration(eta)
+        ))
+      }
       r2_boot[b, idx] <- .cv_r2_first_stage(donor_subs_spec[[b]], y_var,
                                              candidate_subsets[[idx]],
                                              outcome_scale, k_folds)
     }
+    gc(verbose = FALSE)  # modest housekeeping between models, not expected to be the main
+                         # lever on speed -- the slowdown with larger subsets is primarily
+                         # the genuine cost of wider design matrices (see qa_diagnose() Details)
   }
   if (verbose) cat("\n")
 

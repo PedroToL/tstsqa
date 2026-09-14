@@ -2,6 +2,29 @@
 # Shared internal helpers used by both qa_fit() and qa_diagnose().
 # ============================================================================
 
+# --- Small internal helper: format a duration in seconds as "Xs"/"Xm Ys"/
+# "Xh Ym", for human-readable progress ETAs.
+.format_duration <- function(secs) {
+  if (is.na(secs) || !is.finite(secs)) return("--")
+  secs <- max(0, secs)
+  if (secs < 60) return(sprintf("%ds", round(secs)))
+  mins <- secs %/% 60
+  if (mins < 60) return(sprintf("%dm %ds", mins, round(secs %% 60)))
+  hours <- mins %/% 60
+  sprintf("%dh %dm", hours, round(mins %% 60))
+}
+
+# --- Small internal helper: print a fixed-width progress line over \r -----
+# Left-justifies to a generous fixed width so a shorter message always
+# fully overwrites a longer previous one -- \r only returns the cursor to
+# the start of the line, it does not clear it, so without padding, trailing
+# characters from a longer prior message can visually linger (e.g. a
+# "Bootstrap 100/100" message leaving a stray "00" after a subsequent,
+# shorter "Bootstrap 1/100").
+.print_progress <- function(msg) {
+  cat(sprintf("\r%-90s", msg))
+}
+
 # --- Check that donor and target agree on categorical levels for x_vars ---
 # For every x_var that is a factor or character column, compares the set of
 # levels present in donor_data vs target_data:

@@ -217,6 +217,25 @@ test_that("target level absent from donor is rejected upfront (before any bootst
     "not present in donor_data"
   )
 })
+test_that("a rare factor level isolated into one CV fold does not crash the run", {
+  set.seed(99)
+  n <- 3000
+  X1 <- rnorm(n)
+  # Rare level: only ~4 rows total, likely to end up isolated in one of 5 folds
+  region <- factor(sample(c("A", "B", "RARE"), n, replace = TRUE, prob = c(0.60, 0.399, 0.001)))
+  y <- exp(1 + 0.5 * X1 + rnorm(n, sd = 0.8))
+  z1 <- 0.4 * X1 + rnorm(n, sd = 0.5)
+  donor  <- data.frame(y = y[1:1500], X1 = X1[1:1500], region = region[1:1500])
+  target <- data.frame(X1 = X1[1501:3000], region = region[1501:3000], z1 = z1[1501:3000])
+
+  result <- tryCatch({
+    suppressWarnings(qa_diagnose(donor, target, y_var = "y", z_vars = "z1",
+                                   x_vars = c("X1", "region"), B = 10, verbose = FALSE,
+                                   subsample_cap = Inf))
+    "ok"
+  }, error = function(e) conditionMessage(e))
+  expect_equal(result, "ok")
+})
 
 # ---------------------------------------------------------------------------
 # Plotting
