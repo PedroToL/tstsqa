@@ -141,8 +141,8 @@ diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
 #>
 #> rho*:
 #>  z_var   mean ci_lower ci_upper
-#>     z1 0.1069   0.0942   0.1205
-#>     z2 0.6369   0.6074   0.6647
+#>     z1 0.1073   0.0946   0.1213
+#>     z2 0.6395   0.6072   0.6709
 
 diagnosis$S_plot
 ```
@@ -194,7 +194,7 @@ adjusted_log_y  <- log(final_fit$y_adjusted)    # y_adjusted is on the level sca
 round(c(observed = var(observed_log_y), predicted = var(predicted_log_y),
         adjusted = var(adjusted_log_y)), 3)
 #> observed predicted  adjusted
-#>    1.071     0.486     1.091
+#>    1.071     0.486     1.090
 
 density_df <- data.frame(
   log_y = c(observed_log_y, predicted_log_y, adjusted_log_y),

@@ -20,6 +20,12 @@
 #   data (not a subsample) is also returned, for the actual adjustment
 #   applied to the whole target sample.
 #
+#   Optional donor_weights (survey/design weights) are honored throughout:
+#   every donor-side fit is weighted accordingly, and every donor bootstrap
+#   draw resamples the weights using the identical drawn indices. z_k ~ X
+#   regressions in the target sample remain unweighted regardless (see
+#   Still-open limitations).
+#
 # HARDENED -- current state:
 #   - Full input validation: types, required columns, numeric checks, no
 #     missing values, y_var/x_vars/z_vars non-overlapping and non-duplicated,
@@ -46,30 +52,37 @@
 # then, callers of this file must source("R/qa_fit.R") first.
 
 # --- Small internal helper: fit the first stage and compute in-sample R^2 -
-.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale) {
+# weights, if supplied, are passed to lm()/glm() as prior weights (matching
+# qa_fit()'s own WLS/GLM-var-weights treatment of donor_weights), and the
+# R^2 itself is computed as a weighted variance ratio via Hmisc::wtd.var()
+# so the diagnostic stays consistent with a weighted first-stage fit.
+.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale, weights = NULL) {
+  if (is.null(weights)) weights <- rep(1, nrow(data))
   if (outcome_scale == "log") {
     y_model <- log(data[[y_var]])
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::lm(f, data = fit_data)
+    mod <- stats::lm(f, data = fit_data, weights = weights)
     y_hat <- stats::predict(mod, newdata = data)
   } else {
     y_model <- data[[y_var]]
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"))
+    mod <- stats::glm(f, data = fit_data, weights = weights,
+                       family = stats::gaussian(link = "log"))
     y_hat <- stats::predict(mod, newdata = data, type = "response")
   }
-  r2 <- stats::var(y_hat) / stats::var(y_model)
+  r2 <- Hmisc::wtd.var(y_hat, weights = weights) / Hmisc::wtd.var(y_model, weights = weights)
   list(model = mod, y_model = y_model, y_hat = y_hat, r2 = r2)
 }
 
 
 
 # --- Small internal helper: single-pass S_i(z_k) matrix, in-sample --------
-.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale) {
+.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale,
+                               donor_weights = NULL) {
 
-  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale)
+  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale, donor_weights)
   R2_y_full  <- fit_y_full$r2
 
   R2_z_full <- sapply(z_vars, function(z_k) {
@@ -86,7 +99,7 @@
     for (i in active) {
       reduced <- setdiff(active, i)
 
-      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale)
+      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale, donor_weights)
       delta_y_i <- R2_y_full - fit_y_reduced$r2
 
       for (z_k in z_vars) {
@@ -124,6 +137,19 @@
   replace <- n <= cap
   idx <- sample(seq_len(n), n_star, replace = replace)
   data[idx, , drop = FALSE]
+}
+
+# --- Small internal helper: subsample a data frame AND an accompanying
+# weights vector using the SAME drawn indices, so weights stay aligned with
+# whichever rows were actually sampled. Used only for donor_data when
+# donor_weights is supplied; target_data and the no-weights case use the
+# plain .draw_subsample() above.
+.draw_subsample_with_weights <- function(data, weights, cap) {
+  n <- nrow(data)
+  n_star <- min(n, cap)
+  replace <- n <= cap
+  idx <- sample(seq_len(n), n_star, replace = replace)
+  list(data = data[idx, , drop = FALSE], weights = weights[idx])
 }
 
 #' Predictor Selection and Regime Diagnostic for TSTS Quantile Adjustment
@@ -220,6 +246,14 @@
 #'   but does not entirely eliminate, this risk -- an extremely rare level
 #'   can still be excluded from a fold by chance even at the full sample
 #'   size.
+#' @param donor_weights Optional numeric vector, length \code{nrow(donor_data)},
+#'   of nonnegative survey/design weights for the donor sample. When
+#'   supplied, every internal fit that uses donor data (the \eqn{R^2_{y,d}}
+#'   and \eqn{S_i(z_k)} screening regressions, and every \code{qa_fit} call,
+#'   including the final one) is weighted accordingly, and whenever the
+#'   donor sample is bootstrapped, the corresponding weights are resampled
+#'   using the identical drawn indices, so they stay aligned with whichever
+#'   rows were actually sampled. Defaults to \code{NULL} (uniform weights).
 #' @param verbose Logical, default \code{TRUE}. If \code{TRUE}, prints
 #'   progress and results at each step (see Details). Set to \code{FALSE}
 #'   for silent operation.
@@ -270,7 +304,7 @@
 qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                       outcome_scale = c("log", "level"),
                                       tau = 10, B = 100, n_grid = 200,
-                                      subsample_cap = 5000,
+                                      subsample_cap = 5000, donor_weights = NULL,
                                       verbose = TRUE, plotting = FALSE) {
 
   outcome_scale <- match.arg(outcome_scale)
@@ -362,6 +396,18 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     stop("subsample_cap must be a single positive number (use Inf for the full sample).")
   }
 
+  # --- Input validation: donor_weights (mirrors qa_fit()'s own checks) ----
+  if (!is.null(donor_weights)) {
+    if (length(donor_weights) != nrow(donor_data)) {
+      stop(sprintf(
+        "donor_weights has length %d but donor_data has %d rows; they must match.",
+        length(donor_weights), nrow(donor_data)
+      ))
+    }
+    if (any(donor_weights < 0)) stop("donor_weights must be nonnegative.")
+    if (sum(donor_weights) == 0) stop("donor_weights cannot be all zero.")
+  }
+
   # --- Input validation: plotting dependency ------------------------------
   if (isTRUE(plotting) && !requireNamespace("ggplot2", quietly = TRUE)) {
     stop("plotting = TRUE requires the 'ggplot2' package. ",
@@ -400,10 +446,17 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
         .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
                                  b, B, 100 * b / B, .format_duration(eta)))
       }
-      donor_sub  <- .draw_subsample(donor_data, subsample_cap)
+      if (is.null(donor_weights)) {
+        donor_sub <- .draw_subsample(donor_data, subsample_cap)
+        donor_weights_sub <- NULL
+      } else {
+        drawn <- .draw_subsample_with_weights(donor_data, donor_weights, subsample_cap)
+        donor_sub <- drawn$data
+        donor_weights_sub <- drawn$weights
+      }
       target_sub <- .draw_subsample(target_data, subsample_cap)
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
-                                          active, outcome_scale)$S
+                                          active, outcome_scale, donor_weights_sub)$S
     }
     if (verbose) cat("\n")
 
@@ -474,10 +527,13 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       z_var     = rep(z_vars, each  = length(active)),
       mean_S    = as.vector(S_mean)
     )
-    plot_df$label <- paste0(plot_df$z_var, "\n", plot_df$predictor)
 
-    # Order bars from highest to lowest mean S (top to bottom after coord_flip)
+    # Order bars from highest to lowest mean S, then keep only the top 5 --
+    # matching the "Top 5 S_i(z_k) pairs" printed table's own convention,
+    # so the plot doesn't get cluttered with many predictor/z_k pairs.
     plot_df <- plot_df[order(-plot_df$mean_S), ]
+    plot_df <- utils::head(plot_df, 5)
+    plot_df$label <- paste0(plot_df$z_var, "\n", plot_df$predictor)
     plot_df$label <- factor(plot_df$label, levels = rev(plot_df$label))
 
     S_plot <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$label, y = .data$mean_S,
@@ -516,10 +572,17 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                b, B, 100 * b / B, .format_duration(eta)))
     }
 
-    donor_sub  <- .draw_subsample(donor_data, subsample_cap)
+    if (is.null(donor_weights)) {
+      donor_sub <- .draw_subsample(donor_data, subsample_cap)
+      donor_weights_sub <- NULL
+    } else {
+      drawn <- .draw_subsample_with_weights(donor_data, donor_weights, subsample_cap)
+      donor_sub <- drawn$data
+      donor_weights_sub <- drawn$weights
+    }
     target_sub <- .draw_subsample(target_data, subsample_cap)
 
-    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale)
+    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale, donor_weights_sub)
     r2_boot[b] <- fit_sub$r2
     eps_d_sub  <- fit_sub$y_model - fit_sub$y_hat
 
@@ -535,7 +598,8 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     # .check_factor_levels) -- tolerate that here by skipping this
     # replicate's rho* (left NA) rather than crashing the whole run.
     qa_sub <- tryCatch(
-      qa_fit(donor_sub, target_sub, y_var, active, outcome_scale = outcome_scale, n_grid = n_grid),
+      qa_fit(donor_sub, target_sub, y_var, active, outcome_scale = outcome_scale,
+             n_grid = n_grid, donor_weights = donor_weights_sub),
       error = function(e) NULL
     )
     if (is.null(qa_sub)) next
@@ -577,7 +641,8 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   # Final fit on the FULL data, using the selected specification
   # ==========================================================================
   qa_result <- qa_fit(donor_data, target_data, y_var, active,
-                       outcome_scale = outcome_scale, n_grid = n_grid)
+                       outcome_scale = outcome_scale, n_grid = n_grid,
+                       donor_weights = donor_weights)
 
   list(
     selected_predictors = active,

@@ -1,59 +1,20 @@
-# --- Small internal helper: wrap the raw smooth.spline in a callable that
-# evaluates the spline only in the dense, well-supported interior, and
-# uses a robust windowed OLS linear approximation for p in the sparse
-# boundary regions (the bottom/top tail_frac fraction of p_grid) and
-# anything beyond them.
+# --- Small internal helper: wrap the raw smooth.spline as a plain callable,
+# eta_spline(p), rather than requiring predict(eta_spline, p)$y.
 #
-# Two things were tested empirically and found NOT to fix
-# cross-implementation tail instability on their own:
-#   (1) linear extrapolation from the spline's own analytic derivative at
-#       the boundary knot -- unstable, since R's smooth.spline and scipy's
-#       smoothing spline pick very different local curvature (hence
-#       derivative) once the grid reaches into a sparse tail;
-#   (2) widening the grid to include the literal endpoints p=0, p=1 --
-#       this makes the spline try to interpolate through a single,
-#       inherently noisy extreme observation, which was found to make the
-#       worst case WORSE, not better.
-# What DOES work: replacing the spline entirely in the sparse boundary
-# window with a simple OLS fit over that window's own points (means and
-# sums of squares), which is just arithmetic and therefore agrees across
-# implementations by construction, rather than depending on either
-# library's automatic smoothing-parameter selection in a region where
-# that selection has been shown to be unstable.
-.build_eta_function <- function(eta_spline_raw, p_grid, eta_grid, tail_frac = 0.02) {
-  n <- length(p_grid)
-  # Bound k so the low/high windows never overlap or exceed the grid --
-  # with a very small n_grid, floor(n/2) can be smaller than the
-  # max(5, ...) floor, and indexing p_grid[1:k] with k > n would silently
-  # return NA for the out-of-bounds elements rather than erroring.
-  k <- min(max(5, round(tail_frac * n)), floor(n / 2))
-
-  # Robust linear fit over the lower window (first k grid points, p_grid
-  # is already sorted ascending); p_lo_bound is where this window ends
-  # and the spline's domain begins.
-  p_lo <- p_grid[1:k]; eta_lo <- eta_grid[1:k]
-  p_lo_bar <- mean(p_lo); eta_lo_bar <- mean(eta_lo)
-  slope_lo <- sum((p_lo - p_lo_bar) * (eta_lo - eta_lo_bar)) / sum((p_lo - p_lo_bar)^2)
-  intercept_lo <- eta_lo_bar - slope_lo * p_lo_bar
-  p_lo_bound <- max(p_lo)
-
-  # Same at the upper window (last k grid points)
-  p_hi <- p_grid[(n - k + 1):n]; eta_hi <- eta_grid[(n - k + 1):n]
-  p_hi_bar <- mean(p_hi); eta_hi_bar <- mean(eta_hi)
-  slope_hi <- sum((p_hi - p_hi_bar) * (eta_hi - eta_hi_bar)) / sum((p_hi - p_hi_bar)^2)
-  intercept_hi <- eta_hi_bar - slope_hi * p_hi_bar
-  p_hi_bound <- min(p_hi)
-
-  function(p) {
-    out <- numeric(length(p))
-    low    <- p <= p_lo_bound
-    high   <- p >= p_hi_bound
-    middle <- !low & !high
-    if (any(middle)) out[middle] <- stats::predict(eta_spline_raw, p[middle])$y
-    if (any(low))    out[low]    <- intercept_lo + slope_lo * p[low]
-    if (any(high))   out[high]   <- intercept_hi + slope_hi * p[high]
-    out
-  }
+# A windowed-OLS linear override for the sparse boundary region was tried
+# and reverted: it was built to fix R-vs-Python cross-implementation tail
+# instability (no longer a live concern -- the Python port is shelved), but
+# was found, via Monte Carlo validation, to introduce a systematic
+# DOWNWARD bias in recovered variance -- replacing a genuinely curved
+# (accelerating) tail shape with a flatter windowed-average linear
+# approximation understates how extreme the correction should be exactly
+# where it matters most for the distribution's variance. Plain spline
+# extrapolation (this version) was empirically closer to unbiased across
+# repeated simulation, at the cost of occasional instability in individual
+# replications -- a trade-off judged acceptable now that cross-language
+# matching is not a goal.
+.build_eta_function <- function(eta_spline_raw) {
+  function(p) stats::predict(eta_spline_raw, p)$y
 }
 
 #' Quantile Adjustment for Two-Sample Two-Stage (TSTS) Imputation
@@ -89,13 +50,17 @@
 #' The estimation grid runs from \eqn{1/(n\_grid+1)} to
 #' \eqn{n\_grid/(n\_grid+1)}; a target observation whose predicted rank
 #' falls outside this range triggers a common-support warning (Section
-#' 5.2) and its adjustment relies on extrapolation. That extrapolation is
-#' explicitly linear, continuing from the fitted spline's own value and
-#' first derivative at the nearest grid boundary, rather than relying on
-#' \code{smooth.spline}'s own extrapolation behavior beyond its fitted
-#' domain, which is not reproducible across smoothing-spline
-#' implementations. The default \code{n_grid = 1000} reaches the 99.9th
-#' percentile, so this affects only the most extreme observations.
+#' 5.2) and its adjustment relies on \code{smooth.spline}'s own
+#' extrapolation beyond its fitted domain. An earlier version of this
+#' function overrode that extrapolation with a windowed linear
+#' approximation, built to keep results reproducible against an
+#' (since-shelved) Python port; Monte Carlo validation found that override
+#' introduced a systematic downward bias in recovered variance, since a
+#' linear approximation understates the genuinely accelerating shape
+#' \eqn{\hat\eta(p)} takes near the extremes. Plain spline extrapolation
+#' (the current behavior) was empirically closer to unbiased across
+#' repeated simulation, at the cost of occasional instability in
+#' individual replications.
 #'
 #' Weighting (via \code{donor_weights}) enters only through the empirical
 #' quantile estimates used to build \eqn{\hat\eta(p)}. It is the caller's
@@ -150,10 +115,9 @@
 #'   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
 #'   \item{donor_resid}{Donor in-sample residuals on the model scale.}
 #'   \item{eta_spline}{A callable function, \code{eta_spline(p)}, giving the
-#'     estimated quantile-gap value at position(s) \code{p}. Evaluates the
-#'     fitted smoothing spline within \eqn{[\min(p), \max(p)]} of the
-#'     estimation grid, and linearly extrapolates beyond it using the
-#'     spline's own boundary derivative (see Details).}
+#'     estimated quantile-gap value at position(s) \code{p}, via the fitted
+#'     smoothing spline (using its own extrapolation beyond the estimation
+#'     grid; see Details).}
 #'   \item{donor_ecdf}{A function giving the weighted empirical CDF of donor
 #'     predicted values, used to assign target quantile positions.}
 #'   \item{p_grid}{The interior quantile grid in \eqn{(0,1)} used to estimate
@@ -191,7 +155,7 @@
 #' @export
 qa_fit <- function(donor_data, target_data, y_var, x_vars,
                                  outcome_scale = c("log", "level"),
-                                 n_grid = 1000,
+                                 n_grid = 200,
                                  donor_weights = NULL,
                                  plotting = FALSE,
                                  annotate_p = NULL) {
@@ -334,14 +298,10 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
   }
 
   # --- Step 3: quantile grid on the open interval (0, 1) -------------------
-  # Deliberately interior-only (never exactly 0 or 1): including the
-  # literal sample min/max as spline-fitting knots was tested and found
-  # to make cross-implementation tail instability WORSE, not better --
-  # forcing the spline through a single noisy extreme point lets it
-  # distort its shape trying to accommodate that one observation. The
-  # sparse boundary region is instead handled explicitly via a robust
-  # windowed-OLS linear treatment in .build_eta_function(), not by
-  # anchoring the spline fit itself at the extremes.
+  # Interior-only (never exactly 0 or 1): including the literal sample
+  # min/max as spline-fitting knots was tested and found to make things
+  # worse (forcing the spline through a single noisy extreme point distorts
+  # its shape trying to accommodate that one observation).
   p_grid <- seq(1 / (n_grid + 1), n_grid / (n_grid + 1), length.out = n_grid)
 
   # --- Step 4: weighted empirical quantile gap at each grid point ----------
@@ -351,7 +311,7 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
 
   # --- Step 5: smoothing spline over the grid (always unweighted) ---------
   eta_spline_raw <- stats::smooth.spline(p_grid, eta_grid)
-  eta_spline <- .build_eta_function(eta_spline_raw, p_grid, eta_grid)
+  eta_spline <- .build_eta_function(eta_spline_raw)
 
   # --- Step 6: weighted empirical CDF of donor predicted values ------------
   ord   <- order(y_hat_d)

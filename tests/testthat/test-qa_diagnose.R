@@ -96,6 +96,56 @@ test_that("outcome_scale is printed as the very first line", {
   )
   expect_equal(out[1], "Outcome scale: log")
 })
+test_that("S_plot never shows more than 5 bars, even with more available pairs", {
+  skip_if_not_installed("ggplot2")
+  set.seed(3)
+  n <- 3000
+  X1 <- rnorm(n); X2 <- rnorm(n); X3 <- rnorm(n); X4 <- rnorm(n)
+  y  <- exp(1 + 0.5 * X1 + 0.3 * X3 + 0.2 * X4 + rnorm(n, sd = 0.8))
+  z1 <- 0.3 * X1 + rnorm(n, sd = 0.5)
+  z2 <- 0.4 * X3 + rnorm(n, sd = 0.5)
+  donor  <- data.frame(y = y[1:1500], X1 = X1[1:1500], X2 = X2[1:1500],
+                        X3 = X3[1:1500], X4 = X4[1:1500])
+  target <- data.frame(X1 = X1[1501:3000], X2 = X2[1501:3000], X3 = X3[1501:3000],
+                        X4 = X4[1501:3000], z1 = z1[1501:3000], z2 = z2[1501:3000])
+  result <- suppressWarnings(qa_diagnose(donor, target, y_var = "y", z_vars = c("z1", "z2"),
+                                           x_vars = c("X1", "X2", "X3", "X4"),
+                                           B = 10, verbose = FALSE, plotting = TRUE))
+  expect_lte(nrow(result$S_plot$data), 5)
+})
+
+test_that("donor_weights runs end-to-end and changes the result", {
+  d <- make_toy_data()
+  set.seed(99)
+  w <- runif(nrow(d$donor), 0.5, 2)
+  result_unweighted <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = FALSE
+  ))
+  result_weighted <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = FALSE,
+    donor_weights = w
+  ))
+  expect_true(is.list(result_weighted))
+  expect_false(isTRUE(all.equal(result_unweighted$R2_y_donor$mean,
+                                  result_weighted$R2_y_donor$mean)))
+})
+
+test_that("donor_weights validation fires for length mismatch, negatives, all-zero", {
+  d <- make_toy_data()
+  n_d <- nrow(d$donor)
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), donor_weights = rep(1, n_d - 1)),
+    "must match"
+  )
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), donor_weights = rep(-1, n_d)),
+    "nonnegative"
+  )
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), donor_weights = rep(0, n_d)),
+    "all zero"
+  )
+})
 
 # ---------------------------------------------------------------------------
 # Input validation: types and structure

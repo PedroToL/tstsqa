@@ -10,7 +10,7 @@ qa_fit(
   y_var,
   x_vars,
   outcome_scale = c("log", "level"),
-  n_grid = 1000,
+  n_grid = 200,
   donor_weights = NULL,
   plotting = FALSE,
   annotate_p = NULL
@@ -70,10 +70,9 @@ A list with components:
   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
   \item{donor_resid}{Donor in-sample residuals on the model scale.}
   \item{eta_spline}{A callable function, \code{eta_spline(p)}, giving the
-    estimated quantile-gap value at position(s) \code{p}. Evaluates the
-    fitted smoothing spline within \eqn{[\min(p), \max(p)]} of the
-    estimation grid, and linearly extrapolates beyond it using the
-    spline's own boundary derivative (see Details).}
+    estimated quantile-gap value at position(s) \code{p}, via the fitted
+    smoothing spline (using its own extrapolation beyond the estimation
+    grid; see Details).}
   \item{donor_ecdf}{A function giving the weighted empirical CDF of donor
     predicted values, used to assign target quantile positions.}
   \item{p_grid}{The interior quantile grid in \eqn{(0,1)} used to estimate
@@ -126,13 +125,17 @@ and the first-stage model family, not just a cosmetic transform:
 The estimation grid runs from \eqn{1/(n\_grid+1)} to
 \eqn{n\_grid/(n\_grid+1)}; a target observation whose predicted rank
 falls outside this range triggers a common-support warning (Section
-5.2) and its adjustment relies on extrapolation. That extrapolation is
-explicitly linear, continuing from the fitted spline's own value and
-first derivative at the nearest grid boundary, rather than relying on
-\code{smooth.spline}'s own extrapolation behavior beyond its fitted
-domain, which is not reproducible across smoothing-spline
-implementations. The default \code{n_grid = 1000} reaches the 99.9th
-percentile, so this affects only the most extreme observations.
+5.2) and its adjustment relies on \code{smooth.spline}'s own
+extrapolation beyond its fitted domain. An earlier version of this
+function overrode that extrapolation with a windowed linear
+approximation, built to keep results reproducible against an
+(since-shelved) Python port; Monte Carlo validation found that override
+introduced a systematic downward bias in recovered variance, since a
+linear approximation understates the genuinely accelerating shape
+\eqn{\hat\eta(p)} takes near the extremes. Plain spline extrapolation
+(the current behavior) was empirically closer to unbiased across
+repeated simulation, at the cost of occasional instability in
+individual replications.
 
 Weighting (via \code{donor_weights}) enters only through the empirical
 quantile estimates used to build \eqn{\hat\eta(p)}. It is the caller's
