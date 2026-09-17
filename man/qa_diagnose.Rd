@@ -78,13 +78,16 @@ can still be excluded from a fold by chance even at the full sample
 size.}
 
 \item{donor_weights}{Optional numeric vector, length \code{nrow(donor_data)},
-of nonnegative survey/design weights for the donor sample. When
-supplied, every internal fit that uses donor data (the \eqn{R^2_{y,d}}
-and \eqn{S_i(z_k)} screening regressions, and every \code{qa_fit} call,
-including the final one) is weighted accordingly, and whenever the
-donor sample is bootstrapped, the corresponding weights are resampled
-using the identical drawn indices, so they stay aligned with whichever
-rows were actually sampled. Defaults to \code{NULL} (uniform weights).}
+of nonnegative survey/design weights for the donor sample. Weighting is
+intentionally NOT applied to the \code{lm()}/\code{glm()} first-stage
+fits themselves (cross-checking on real survey data found this made no
+measurable difference to recovery); \code{donor_weights} instead enters
+the \eqn{R^2_{y,d}} and \eqn{S_i(z_k)} calculations directly, and the
+quantile estimation inside every \code{qa_fit} call (including the
+final one), where it was found to matter. Whenever the donor sample is
+bootstrapped, the corresponding weights are resampled using the
+identical drawn indices, so they stay aligned with whichever rows were
+actually sampled. Defaults to \code{NULL} (uniform weights).}
 
 \item{verbose}{Logical, default \code{TRUE}. If \code{TRUE}, prints
 progress and results at each step (see Details). Set to \code{FALSE}

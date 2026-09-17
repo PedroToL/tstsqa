@@ -20,11 +20,13 @@
 #   data (not a subsample) is also returned, for the actual adjustment
 #   applied to the whole target sample.
 #
-#   Optional donor_weights (survey/design weights) are honored throughout:
-#   every donor-side fit is weighted accordingly, and every donor bootstrap
-#   draw resamples the weights using the identical drawn indices. z_k ~ X
-#   regressions in the target sample remain unweighted regardless (see
-#   Still-open limitations).
+#   Optional donor_weights (survey/design weights) enter the R^2_{y,d} and
+#   S_i(z_k) calculations and the quantile estimation inside every qa_fit()
+#   call, but are NOT passed to the lm()/glm() first-stage fits themselves
+#   (found empirically to make no measurable difference there). Every donor
+#   bootstrap draw resamples the weights using the identical drawn indices.
+#   z_k ~ X regressions in the target sample remain unweighted regardless
+#   (see Still-open limitations).
 #
 # HARDENED -- current state:
 #   - Full input validation: types, required columns, numeric checks, no
@@ -58,18 +60,20 @@
 # so the diagnostic stays consistent with a weighted first-stage fit.
 .fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale, weights = NULL) {
   if (is.null(weights)) weights <- rep(1, nrow(data))
+  # weights intentionally NOT passed to lm()/glm() here -- see qa_fit.R for
+  # the same change and its rationale. weights is still used below, in the
+  # R^2 calculation itself.
   if (outcome_scale == "log") {
     y_model <- log(data[[y_var]])
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::lm(f, data = fit_data, weights = weights)
+    mod <- stats::lm(f, data = fit_data)
     y_hat <- stats::predict(mod, newdata = data)
   } else {
     y_model <- data[[y_var]]
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::glm(f, data = fit_data, weights = weights,
-                       family = stats::gaussian(link = "log"))
+    mod <- stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"))
     y_hat <- stats::predict(mod, newdata = data, type = "response")
   }
   r2 <- Hmisc::wtd.var(y_hat, weights = weights) / Hmisc::wtd.var(y_model, weights = weights)
@@ -247,13 +251,16 @@
 #'   can still be excluded from a fold by chance even at the full sample
 #'   size.
 #' @param donor_weights Optional numeric vector, length \code{nrow(donor_data)},
-#'   of nonnegative survey/design weights for the donor sample. When
-#'   supplied, every internal fit that uses donor data (the \eqn{R^2_{y,d}}
-#'   and \eqn{S_i(z_k)} screening regressions, and every \code{qa_fit} call,
-#'   including the final one) is weighted accordingly, and whenever the
-#'   donor sample is bootstrapped, the corresponding weights are resampled
-#'   using the identical drawn indices, so they stay aligned with whichever
-#'   rows were actually sampled. Defaults to \code{NULL} (uniform weights).
+#'   of nonnegative survey/design weights for the donor sample. Weighting is
+#'   intentionally NOT applied to the \code{lm()}/\code{glm()} first-stage
+#'   fits themselves (cross-checking on real survey data found this made no
+#'   measurable difference to recovery); \code{donor_weights} instead enters
+#'   the \eqn{R^2_{y,d}} and \eqn{S_i(z_k)} calculations directly, and the
+#'   quantile estimation inside every \code{qa_fit} call (including the
+#'   final one), where it was found to matter. Whenever the donor sample is
+#'   bootstrapped, the corresponding weights are resampled using the
+#'   identical drawn indices, so they stay aligned with whichever rows were
+#'   actually sampled. Defaults to \code{NULL} (uniform weights).
 #' @param verbose Logical, default \code{TRUE}. If \code{TRUE}, prints
 #'   progress and results at each step (see Details). Set to \code{FALSE}
 #'   for silent operation.

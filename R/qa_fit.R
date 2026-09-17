@@ -282,17 +282,22 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
   # with a log link, so predictions on the response scale directly target
   # E[y | X] in levels and the additive variance-restoration property holds
   # without a back-transform (see paper's Section 3.1 footnote).
+  #
+  # donor_weights is intentionally NOT passed to this fit: cross-checking
+  # on real survey data found weighting the model fit made no measurable
+  # difference to recovery, and the source of a systematic bias traced
+  # entirely to the quantile step below. donor_weights is used there only.
   if (outcome_scale == "log") {
     y_model_d <- log(donor_data[[y_var]])
     fit_data <- cbind(donor_data, y_model_d)
     model_formula <- stats::reformulate(x_vars, response = "y_model_d")
-    hat_f <- stats::lm(model_formula, data = fit_data, weights = donor_weights)
+    hat_f <- stats::lm(model_formula, data = fit_data)
     y_hat_d <- stats::predict(hat_f, newdata = donor_data)
   } else {
     y_model_d <- donor_data[[y_var]]
     fit_data <- cbind(donor_data, y_model_d)
     model_formula <- stats::reformulate(x_vars, response = "y_model_d")
-    hat_f <- stats::glm(model_formula, data = fit_data, weights = donor_weights,
+    hat_f <- stats::glm(model_formula, data = fit_data,
                          family = stats::gaussian(link = "log"))
     y_hat_d <- stats::predict(hat_f, newdata = donor_data, type = "response")
   }
