@@ -98,20 +98,8 @@
 #'   weights (unweighted quantiles). Weights need not sum to any particular
 #'   value; any positive common scale is equivalent, since quantiles are
 #'   scale-invariant to rescaling of the weights.
-#' @param plotting Logical, default \code{FALSE}. If \code{TRUE}, additionally
-#'   builds a \code{ggplot2} plot of the estimated quantile gap
-#'   \eqn{\hat\eta(p)}: the raw (noisy) grid-point estimates as points, and
-#'   the fitted smoothing spline as a line, returned as \code{eta_plot}.
-#'   Requires the \code{ggplot2} package to be installed; \code{ggplot2} is
-#'   listed under \code{Suggests} rather than \code{Imports} so it is not a
-#'   hard dependency for users who never request a plot.
-#' @param annotate_p Optional single numeric in \eqn{(0,1)}, used only when
-#'   \code{plotting = TRUE}. If supplied, the plot marks
-#'   \eqn{\hat\eta(\code{annotate\_p})} (read off the fitted spline) with a
-#'   point, a dropline to zero, and a text label.
-#'   Defaults to \code{NULL} (no annotation).
 #'
-#' @return A list with components:
+#' @return A list (class \code{"qa_fit"}) with components:
 #'   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
 #'   \item{donor_resid}{Donor in-sample residuals on the model scale.}
 #'   \item{eta_spline}{A callable function, \code{eta_spline(p)}, giving the
@@ -135,8 +123,9 @@
 #'     scale if \code{"level"}).}
 #'   \item{y_adjusted}{Final quantile-adjusted outcome for the target sample,
 #'     always on the level (original) scale.}
-#'   \item{eta_plot}{A \code{ggplot} object showing the raw and smoothed
-#'     \eqn{\hat\eta(p)} curve, or \code{NULL} if \code{plotting = FALSE}.}
+#'
+#' Use \code{plot()} on the returned object for the \eqn{\hat\eta(p)} curve,
+#' and \code{print()} for a formatted one-line summary.
 #'
 #' @examples
 #' \dontrun{
@@ -156,9 +145,7 @@
 qa_fit <- function(donor_data, target_data, y_var, x_vars,
                                  outcome_scale = c("log", "level"),
                                  n_grid = 200,
-                                 donor_weights = NULL,
-                                 plotting = FALSE,
-                                 annotate_p = NULL) {
+                                 donor_weights = NULL) {
 
   outcome_scale <- match.arg(outcome_scale)
 
@@ -198,26 +185,6 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
   # curve; below that the "smoothing" spline is not doing anything sensible.
   if (!is.numeric(n_grid) || length(n_grid) != 1 || n_grid != round(n_grid) || n_grid < 4) {
     stop("n_grid must be a single integer of at least 4.")
-  }
-
-  # --- Input validation: plotting dependency ------------------------------
-  # ggplot2 is an optional (Suggests) dependency, only needed when a plot is
-  # actually requested. Fail early and clearly rather than partway through
-  # the function after the expensive fitting steps have already run.
-  if (isTRUE(plotting) && !requireNamespace("ggplot2", quietly = TRUE)) {
-    stop("plotting = TRUE requires the 'ggplot2' package. ",
-         "Install it with install.packages('ggplot2'), or call with plotting = FALSE.")
-  }
-
-  # --- Input validation: annotate_p ----------------------------------------
-  # Only meaningful (and only checked) when a plot is actually requested;
-  # a stray annotate_p with plotting = FALSE is silently ignored below rather
-  # than erroring, since it has no effect either way.
-  if (isTRUE(plotting) && !is.null(annotate_p)) {
-    if (!is.numeric(annotate_p) || length(annotate_p) != 1 ||
-        annotate_p <= 0 || annotate_p >= 1) {
-      stop("annotate_p must be a single numeric value strictly between 0 and 1.")
-    }
   }
 
   # --- Input validation: missing values ---------------------------------
@@ -353,71 +320,122 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
   # --- Step 8: back-transform only when estimation was done in log space --
   y_adjusted <- if (outcome_scale == "log") exp(y_tilde_model) else y_tilde_model
 
-  # --- Optional: diagnostic plot of the estimated quantile gap eta(p) ------
-  # Shows the raw (noisy) grid-point estimates of eta(p) = Q_y(p) - Q_yhat(p)
-  # as points, against the smoothed spline fit as a line -- this is the
-  # object that actually gets used to adjust the target sample, so plotting
-  # it directly (rather than the two underlying quantile-function curves)
-  # shows what the correction itself looks like across the distribution.
-  eta_plot <- NULL
-  if (isTRUE(plotting)) {
+  structure(
+    list(
+      model        = hat_f,
+      donor_resid  = y_model_d - y_hat_d,
+      eta_spline   = eta_spline,
+      donor_ecdf   = F_yhat_d,
+      p_grid       = p_grid,
+      Q_y_d        = Q_y_d,
+      Q_yhat_d     = Q_yhat_d,
+      p_target     = p_t,
+      eta_target   = eta_t,
+      y_hat_target = y_hat_t,
+      y_adjusted   = y_adjusted
+    ),
+    class = "qa_fit"
+  )
+}
 
-    raw_data <- data.frame(p = p_grid, eta = eta_grid)
-
-    # Evaluate the spline on a fine grid for a visually smooth curve,
-    # independent of how coarse n_grid was for the raw points.
-    p_fine <- seq(min(p_grid), max(p_grid), length.out = 500)
-    smooth_data <- data.frame(p = p_fine, eta = eta_spline(p_fine))
-
-    eta_plot <- ggplot2::ggplot() +
-      ggplot2::geom_point(data = raw_data, ggplot2::aes(x = .data$p, y = .data$eta),
-                           alpha = 0.35, size = 1, color = "#4C72B0") +
-      ggplot2::geom_line(data = smooth_data, ggplot2::aes(x = .data$p, y = .data$eta),
-                          color = "#0072B2", linewidth = 1.1) +
-      ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "gray60") +
-      ggplot2::labs(x = "Quantile position p", y = expression(hat(eta)(p))) +
-      ggplot2::theme_minimal(base_size = 13) +
-      ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
-                     plot.background = ggplot2::element_rect(fill = "white", color = NA),
-                     panel.background = ggplot2::element_rect(fill = "white", color = NA))
-
-    # Optional annotation of the gap at a single user-chosen quantile position,
-    # read directly off the fitted spline (the same object used internally
-    # to adjust the target sample).
-    if (!is.null(annotate_p)) {
-      if (annotate_p < min(p_grid) || annotate_p > max(p_grid)) {
-        warning(sprintf(
-          "annotate_p = %.3f falls outside the estimated grid range [%.3f, %.3f]; ",
-          annotate_p, min(p_grid), max(p_grid)
-        ), "the annotated value relies on spline extrapolation and may be unreliable.")
-      }
-      eta_at_p <- eta_spline(annotate_p)
-      point_data <- data.frame(p = annotate_p, eta = eta_at_p)
-
-      eta_plot <- eta_plot +
-        ggplot2::geom_segment(data = point_data,
-                               ggplot2::aes(x = .data$p, xend = .data$p, y = 0, yend = .data$eta),
-                               linetype = "dashed", color = "gray40") +
-        ggplot2::geom_point(data = point_data, ggplot2::aes(x = .data$p, y = .data$eta),
-                             color = "#D55E00", size = 2.8) +
-        ggplot2::annotate("text", x = annotate_p, y = eta_at_p,
-                           label = sprintf("eta(%.2f) = %.3f", annotate_p, eta_at_p),
-                           vjust = -0.8, size = 3.6, color = "gray20")
+#' Plot the Estimated Quantile Gap From a \code{qa_fit} Result
+#'
+#' Shows the raw (noisy) grid-point estimates of
+#' \eqn{\hat\eta(p) = Q_y(p) - Q_{\hat y}(p)} as points, against the fitted
+#' smoothing spline as a line -- this is the object that actually gets used
+#' to adjust the target sample, so plotting it directly (rather than the two
+#' underlying quantile-function curves) shows what the correction itself
+#' looks like across the distribution. Built on demand from the components
+#' already stored in \code{x} (\code{p_grid}, \code{Q_y_d}, \code{Q_yhat_d},
+#' \code{eta_spline}), not computed inside \code{\link{qa_fit}} itself.
+#'
+#' @param x A list returned by \code{\link{qa_fit}}.
+#' @param annotate_p Optional single numeric in \eqn{(0,1)}. If supplied,
+#'   the plot marks \eqn{\hat\eta(\code{annotate\_p})} (read off the fitted
+#'   spline) with a point, a dropline to zero, and a text label. Defaults to
+#'   \code{NULL} (no annotation).
+#' @param ... Ignored; present for S3 method consistency.
+#'
+#' @return A \code{ggplot} object. Requires the \code{ggplot2} package to be
+#'   installed; \code{ggplot2} is listed under \code{Suggests} rather than
+#'   \code{Imports} so it is not a hard dependency for users who never plot.
+#'
+#' @export
+plot.qa_fit <- function(x, annotate_p = NULL, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("plot.qa_fit() requires the 'ggplot2' package. ",
+         "Install it with install.packages('ggplot2').")
+  }
+  if (!is.null(annotate_p)) {
+    if (!is.numeric(annotate_p) || length(annotate_p) != 1 ||
+        annotate_p <= 0 || annotate_p >= 1) {
+      stop("annotate_p must be a single numeric value strictly between 0 and 1.")
     }
   }
 
-  list(
-    model        = hat_f,
-    donor_resid  = y_model_d - y_hat_d,
-    eta_spline   = eta_spline,
-    donor_ecdf   = F_yhat_d,
-    p_grid       = p_grid,
-    Q_y_d        = Q_y_d,
-    Q_yhat_d     = Q_yhat_d,
-    p_target     = p_t,
-    eta_target   = eta_t,
-    y_hat_target = y_hat_t,
-    y_adjusted   = y_adjusted,
-    eta_plot     = eta_plot
-  )
+  p_grid <- x$p_grid
+  eta_grid <- x$Q_y_d - x$Q_yhat_d
+  eta_spline <- x$eta_spline
+
+  raw_data <- data.frame(p = p_grid, eta = eta_grid)
+  p_fine <- seq(min(p_grid), max(p_grid), length.out = 500)
+  smooth_data <- data.frame(p = p_fine, eta = eta_spline(p_fine))
+
+  eta_plot <- ggplot2::ggplot() +
+    ggplot2::geom_point(data = raw_data, ggplot2::aes(x = .data$p, y = .data$eta),
+                         alpha = 0.35, size = 1, color = "#4C72B0") +
+    ggplot2::geom_line(data = smooth_data, ggplot2::aes(x = .data$p, y = .data$eta),
+                        color = "#0072B2", linewidth = 1.1) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dotted", color = "gray60") +
+    ggplot2::labs(x = "Quantile position p", y = expression(hat(eta)(p))) +
+    ggplot2::theme_minimal(base_size = 13) +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                   plot.background = ggplot2::element_rect(fill = "white", color = NA),
+                   panel.background = ggplot2::element_rect(fill = "white", color = NA))
+
+  if (!is.null(annotate_p)) {
+    if (annotate_p < min(p_grid) || annotate_p > max(p_grid)) {
+      warning(sprintf(
+        "annotate_p = %.3f falls outside the estimated grid range [%.3f, %.3f]; ",
+        annotate_p, min(p_grid), max(p_grid)
+      ), "the annotated value relies on spline extrapolation and may be unreliable.")
+    }
+    eta_at_p <- eta_spline(annotate_p)
+    point_data <- data.frame(p = annotate_p, eta = eta_at_p)
+
+    eta_plot <- eta_plot +
+      ggplot2::geom_segment(data = point_data,
+                             ggplot2::aes(x = .data$p, xend = .data$p, y = 0, yend = .data$eta),
+                             linetype = "dashed", color = "gray40") +
+      ggplot2::geom_point(data = point_data, ggplot2::aes(x = .data$p, y = .data$eta),
+                           color = "#D55E00", size = 2.8) +
+      ggplot2::annotate("text", x = annotate_p, y = eta_at_p,
+                         label = sprintf("eta(%.2f) = %.3f", annotate_p, eta_at_p),
+                         vjust = -0.8, size = 3.6, color = "gray20")
+  }
+
+  eta_plot
+}
+
+#' Print a \code{qa_fit} Result
+#'
+#' A formatted summary: the fitted model's scale and predictors, the size
+#' of the donor/target samples, and a brief description of the resulting
+#' adjustment's spread on the target sample.
+#'
+#' @param x A list returned by \code{\link{qa_fit}}.
+#' @param ... Ignored; present for S3 method consistency.
+#'
+#' @export
+print.qa_fit <- function(x, ...) {
+  outcome_scale <- if (identical(class(x$model)[1], "glm")) "level" else "log"
+  cat("<qa_fit result>\n")
+  cat(sprintf("  Outcome scale:      %s\n", outcome_scale))
+  cat(sprintf("  Predictors:         %s\n", paste(all.vars(stats::formula(x$model))[-1], collapse = ", ")))
+  cat(sprintf("  Donor observations: %d\n", length(x$donor_resid)))
+  cat(sprintf("  Target observations:%d\n", length(x$y_adjusted)))
+  cat(sprintf("  y_adjusted range:   [%.4g, %.4g]\n",
+              min(x$y_adjusted), max(x$y_adjusted)))
+  cat("\nUse plot(x) for the eta(p) curve; see ?qa_fit for full component list.\n")
+  invisible(x)
 }

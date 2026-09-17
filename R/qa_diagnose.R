@@ -44,8 +44,8 @@
 # Still-open limitations:
 #   - z_k ~ X regressions are always plain OLS (unweighted), regardless of
 #     outcome_scale, since z is not transformed anywhere in the paper.
-#   - Printing is unconditional on verbose = TRUE and not throttled for
-#     very large B.
+#   - Printing is not throttled for very large B, at whatever verbose level
+#     is active.
 # ============================================================================
 
 # NOTE: this file depends on qa_fit() (defined in
@@ -196,13 +196,14 @@
 #' is called once more on the FULL data (not a subsample), giving the actual
 #' adjustment applied to the whole target sample.
 #'
-#' When \code{verbose = TRUE} (the default), progress and results are
-#' printed at each step: active predictors and bootstrap progress
-#' (with percentage and ETA) per Variable Selection iteration, a message
-#' whenever a predictor is dropped, the top 5 \eqn{S_i(z_k)} pairs (mean
-#' and 95\% CI) per iteration, a convergence message, then Final
-#' Estimation's own bootstrap progress and the resulting \eqn{R^2_{y,d}}
-#' and \eqn{\rho^*} (mean and 95\% CI).
+#' \code{verbose} controls how much of this is printed as it happens (see
+#' the \code{verbose} parameter below); \code{1} shows section headers and
+#' bootstrap progress with percentage and ETA, and \code{2} additionally
+#' shows active predictors per iteration, a message whenever a predictor is
+#' dropped, the top 5 \eqn{S_i(z_k)} pairs (mean and 95\% CI) per iteration,
+#' a convergence message, and the final \eqn{R^2_{y,d}} and \eqn{\rho^*}
+#' (mean and 95\% CI). Regardless of \code{verbose}, the full results are
+#' always available afterward via \code{print()} on the returned object.
 #'
 #' @param donor_data Data frame containing the donor sample. Must include
 #'   \code{y_var} and all \code{x_vars}, with no missing values in these
@@ -261,24 +262,24 @@
 #'   bootstrapped, the corresponding weights are resampled using the
 #'   identical drawn indices, so they stay aligned with whichever rows were
 #'   actually sampled. Defaults to \code{NULL} (uniform weights).
-#' @param verbose Logical, default \code{TRUE}. If \code{TRUE}, prints
-#'   progress and results at each step (see Details). Set to \code{FALSE}
-#'   for silent operation.
-#' @param plotting Logical, default \code{FALSE}. If \code{TRUE}, builds a
-#'   \code{ggplot2} horizontal bar chart of the final \eqn{S_i(z_k)} mean
-#'   values for the surviving predictors, with reference lines at
-#'   \eqn{\tau = 5} and \eqn{\tau = 10}, returned as \code{S_plot}. Requires
-#'   the \code{ggplot2} package to be installed; listed under
-#'   \code{Suggests} rather than \code{Imports} so it is not a hard
-#'   dependency for users who never request a plot.
+#' @param verbose Integer: \code{0} for silent operation, \code{1} to print
+#'   only progress (section headers and bootstrap progress/ETA), or
+#'   \code{2} (default) for the full print described in Details (adds
+#'   per-iteration variable lists, the top-5 \eqn{S_i(z_k)} table, removal/
+#'   convergence messages, and the final \eqn{R^2_{y,d}}/\eqn{\rho^*} table).
 #'
-#' @return A list with components:
+#' @return A list (class \code{"qa_diagnose"}) with components:
 #'   \item{selected_predictors}{Character vector of predictors that
 #'     survived Variable Selection; the final predictor set.}
 #'   \item{removed_predictors}{A list of removal events, each with the
 #'     iteration number, the removed predictor, the \code{z_var} that
 #'     triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at the
 #'     time of removal.}
+#'   \item{S_table}{Data frame of every (predictor, z_var) pair among the
+#'     final survivors, with \code{mean_S}, \code{ci_lower}, and
+#'     \code{ci_upper} (from the last Variable Selection iteration), ordered
+#'     highest to lowest \code{mean_S}. \code{plot()} shows only the top few
+#'     rows; use this directly for the complete table.}
 #'   \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
 #'     \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
 #'     final predictor set.}
@@ -288,8 +289,9 @@
 #'   \item{qa_fit}{The full return value of the
 #'     \code{\link{qa_fit}} call on the final predictor set, fit on the
 #'     full (non-subsampled) data.}
-#'   \item{S_plot}{A \code{ggplot} object (see \code{plotting} above), or
-#'     \code{NULL} if \code{plotting = FALSE}.}
+#'
+#' Use \code{plot()} on the returned object for the top \eqn{S_i(z_k)}
+#' pairs, and \code{print()} for a formatted summary.
 #'
 #' @examples
 #' \dontrun{
@@ -312,7 +314,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                       outcome_scale = c("log", "level"),
                                       tau = 10, B = 100, n_grid = 200,
                                       subsample_cap = 5000, donor_weights = NULL,
-                                      verbose = TRUE, plotting = FALSE) {
+                                      verbose = 2) {
 
   outcome_scale <- match.arg(outcome_scale)
 
@@ -415,10 +417,9 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     if (sum(donor_weights) == 0) stop("donor_weights cannot be all zero.")
   }
 
-  # --- Input validation: plotting dependency ------------------------------
-  if (isTRUE(plotting) && !requireNamespace("ggplot2", quietly = TRUE)) {
-    stop("plotting = TRUE requires the 'ggplot2' package. ",
-         "Install it with install.packages('ggplot2'), or call with plotting = FALSE.")
+  # --- Input validation: verbose ------------------------------------------
+  if (!is.numeric(verbose) || length(verbose) != 1 || !(verbose %in% c(0, 1, 2))) {
+    stop("verbose must be a single value: 0 (silent), 1 (progress only), or 2 (full print).")
   }
 
   active <- x_vars
@@ -428,7 +429,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   # ==========================================================================
   # VARIABLE SELECTION (Stage 1)
   # ==========================================================================
-  if (verbose) {
+  if (verbose >= 1) {
     cat(sprintf("Outcome scale: %s\n", outcome_scale))
     cat("========== Variable Selection ==========\n")
   }
@@ -437,7 +438,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     iteration <- iteration + 1
 
     # (a) Variables
-    if (verbose) {
+    if (verbose >= 2) {
       cat(sprintf("\n--- Iteration %d ---\n", iteration))
       cat(sprintf("Variables: %s\n", paste(active, collapse = ", ")))
     }
@@ -447,7 +448,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                      dimnames = list(active, z_vars, NULL))
     boot_start_time <- Sys.time()
     for (b in seq_len(B)) {
-      if (verbose) {
+      if (verbose >= 1) {
         elapsed <- as.numeric(difftime(Sys.time(), boot_start_time, units = "secs"))
         eta <- if (b > 1) elapsed / (b - 1) * (B - (b - 1)) else NA
         .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
@@ -465,13 +466,15 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
                                           active, outcome_scale, donor_weights_sub)$S
     }
-    if (verbose) cat("\n")
+    if (verbose >= 1) cat("\n")
 
     S_mean     <- apply(S_boot, c(1, 2), mean, na.rm = TRUE)
     S_ci_lower <- apply(S_boot, c(1, 2), stats::quantile, probs = 0.025, na.rm = TRUE)
     S_ci_upper <- apply(S_boot, c(1, 2), stats::quantile, probs = 0.975, na.rm = TRUE)
 
-    # (d) Table of S(z_k) -- top 5
+    # (d) Full table of S(z_k), all (predictor, z_var) pairs, ordered highest
+    # to lowest mean_S. Stored in full on the return value (not just top 5)
+    # so callers can inspect every pair, not only what gets printed here.
     S_table <- data.frame(
       predictor = rep(active, times = length(z_vars)),
       z_var     = rep(z_vars, each  = length(active)),
@@ -482,14 +485,14 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     S_table <- S_table[order(-S_table$mean_S), ]
     rownames(S_table) <- NULL
 
-    if (verbose) {
+    if (verbose >= 2) {
       cat("Top", min(5, nrow(S_table)), "S_i(z_k) pairs (mean, 95% CI across", B, "subsamples):\n")
       print(utils::head(S_table, 5), row.names = FALSE)
     }
 
     # Cannot screen further if only one predictor remains
     if (length(active) == 1) {
-      if (verbose) cat("\nOnly one predictor remains; stopping Stage 1.\n")
+      if (verbose >= 2) cat("\nOnly one predictor remains; stopping Stage 1.\n")
       break
     }
 
@@ -500,7 +503,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       z_star <- colnames(S_mean)[max_idx["col"]]
       max_S  <- S_mean[max_idx["row"], max_idx["col"]]
 
-      if (verbose) {
+      if (verbose >= 2) {
         cat(sprintf("\nAt least one pair exceeds tau = %.1f: mean S(%s, %s) = %.2f\n",
                      tau, i_star, z_star, max_S))
         cat(sprintf("Removing '%s'.\n", i_star))
@@ -514,65 +517,32 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       )
     } else {
       # (e) Convergence
-      if (verbose) cat(sprintf("\nNo pair exceeds tau = %.1f. Variable selection converged.\n", tau))
+      if (verbose >= 2) cat(sprintf("\nNo pair exceeds tau = %.1f. Variable selection converged.\n", tau))
       break
     }
   }
 
-  if (verbose) {
+  if (verbose >= 1) {
     cat(sprintf("\nStage 1 survivors: %s\n", paste(active, collapse = ", ")))
   }
 
-  # --- Optional: bar plot of the FINAL Stage 1 S_i(z_k), mean only --------
-  # Uses S_mean exactly as computed on the last loop iteration -- this
-  # already corresponds to `active` (== the final survivors), since the
-  # loop breaks without recomputing it further.
-  S_plot <- NULL
-  if (isTRUE(plotting)) {
-    plot_df <- data.frame(
-      predictor = rep(active, times = length(z_vars)),
-      z_var     = rep(z_vars, each  = length(active)),
-      mean_S    = as.vector(S_mean)
-    )
-
-    # Order bars from highest to lowest mean S, then keep only the top 5 --
-    # matching the "Top 5 S_i(z_k) pairs" printed table's own convention,
-    # so the plot doesn't get cluttered with many predictor/z_k pairs.
-    plot_df <- plot_df[order(-plot_df$mean_S), ]
-    plot_df <- utils::head(plot_df, 5)
-    plot_df$label <- paste0(plot_df$z_var, "\n", plot_df$predictor)
-    plot_df$label <- factor(plot_df$label, levels = rev(plot_df$label))
-
-    S_plot <- ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$label, y = .data$mean_S,
-                                                     fill = .data$z_var)) +
-      ggplot2::geom_col(width = 0.65) +
-      ggplot2::coord_flip() +
-      ggplot2::geom_hline(yintercept = c(5, 10), linetype = "dashed", color = "gray50") +
-      ggplot2::annotate("text", x = 0.6, y = 5,  label = "tau = 5",  vjust = -0.5,
-                        size = 3.3, color = "gray30") +
-      ggplot2::annotate("text", x = 0.6, y = 10, label = "tau = 10", vjust = -0.5,
-                        size = 3.3, color = "gray30") +
-      ggplot2::labs(x = NULL, y = expression(S[i](z[k])), fill = NULL) +
-      ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.12))) +
-      ggplot2::scale_fill_brewer(palette = "Set2") +
-      ggplot2::theme_minimal(base_size = 13) +
-      ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
-                     legend.position = "top",
-                     plot.background = ggplot2::element_rect(fill = "white", color = NA),
-                     panel.background = ggplot2::element_rect(fill = "white", color = NA))
-  }
+  # S_table (from the final loop iteration, above) already corresponds to
+  # `active` == the final survivors, and is already ordered highest-to-
+  # lowest mean_S -- returned as-is (in full, not trimmed to top 5) so
+  # callers can inspect every pair. plot() builds the top-5 bar chart from
+  # it on demand; see plot.qa_diagnose().
 
   # ==========================================================================
   # FINAL ESTIMATION: bootstrap R^2_{y,d} and rho* for the final predictors
   # ==========================================================================
-  if (verbose) cat("\n========== Final Estimation ==========\n")
+  if (verbose >= 1) cat("\n========== Final Estimation ==========\n")
 
   r2_boot  <- rep(NA_real_, B)
   rho_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
   final_start_time <- Sys.time()
 
   for (b in seq_len(B)) {
-    if (verbose) {
+    if (verbose >= 1) {
       elapsed <- as.numeric(difftime(Sys.time(), final_start_time, units = "secs"))
       eta <- if (b > 1) elapsed / (b - 1) * (B - (b - 1)) else NA
       .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
@@ -617,7 +587,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
         (stats::sd(eps_d_sub) * stats::sd(z_perp_sub[, z_k]))
     })
   }
-  if (verbose) cat("\n")
+  if (verbose >= 1) cat("\n")
 
   R2_y_donor <- list(
     mean     = mean(r2_boot, na.rm = TRUE),
@@ -631,7 +601,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     ci_upper = apply(rho_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE)
   )
 
-  if (verbose) {
+  if (verbose >= 2) {
     cat(sprintf("R^2_y,d: mean = %.4f, 95%% CI [%.4f, %.4f]\n",
                 R2_y_donor$mean, R2_y_donor$ci_lower, R2_y_donor$ci_upper))
     cat("\nrho*:\n")
@@ -651,12 +621,89 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                        outcome_scale = outcome_scale, n_grid = n_grid,
                        donor_weights = donor_weights)
 
-  list(
-    selected_predictors = active,
-    removed_predictors  = removal_log,
-    R2_y_donor          = R2_y_donor,
-    rho_star            = rho_star,
-    qa_fit              = qa_result,
-    S_plot              = S_plot
+  structure(
+    list(
+      selected_predictors = active,
+      removed_predictors  = removal_log,
+      S_table             = S_table,
+      R2_y_donor          = R2_y_donor,
+      rho_star            = rho_star,
+      qa_fit              = qa_result
+    ),
+    class = "qa_diagnose"
   )
+}
+
+#' Plot the Top S(z_k) Pairs From a \code{qa_diagnose} Result
+#'
+#' A horizontal bar chart of the top \code{n} \eqn{S_i(z_k)} pairs (mean
+#' across bootstrap subsamples) among the final survivors, with reference
+#' lines at \eqn{\tau = 5} and \eqn{\tau = 10}. Built on demand from the
+#' full table already stored in \code{x$S_table}, not computed inside
+#' \code{\link{qa_diagnose}} itself -- use \code{x$S_table} directly for
+#' every pair, not just the ones shown here.
+#'
+#' @param x A list returned by \code{\link{qa_diagnose}}.
+#' @param n Integer, number of top pairs (by mean \eqn{S}) to show. Default 5.
+#' @param ... Ignored; present for S3 method consistency.
+#'
+#' @return A \code{ggplot} object. Requires the \code{ggplot2} package to be
+#'   installed; \code{ggplot2} is listed under \code{Suggests} rather than
+#'   \code{Imports} so it is not a hard dependency for users who never plot.
+#'
+#' @export
+plot.qa_diagnose <- function(x, n = 5, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("plot.qa_diagnose() requires the 'ggplot2' package. ",
+         "Install it with install.packages('ggplot2').")
+  }
+
+  plot_df <- utils::head(x$S_table, n)
+  plot_df$label <- paste0(plot_df$z_var, "\n", plot_df$predictor)
+  plot_df$label <- factor(plot_df$label, levels = rev(plot_df$label))
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = .data$label, y = .data$mean_S,
+                                        fill = .data$z_var)) +
+    ggplot2::geom_col(width = 0.65) +
+    ggplot2::coord_flip() +
+    ggplot2::geom_hline(yintercept = c(5, 10), linetype = "dashed", color = "gray50") +
+    ggplot2::annotate("text", x = 0.6, y = 5,  label = "tau = 5",  vjust = -0.5,
+                      size = 3.3, color = "gray30") +
+    ggplot2::annotate("text", x = 0.6, y = 10, label = "tau = 10", vjust = -0.5,
+                      size = 3.3, color = "gray30") +
+    ggplot2::labs(x = NULL, y = expression(S[i](z[k])), fill = NULL) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.12))) +
+    ggplot2::scale_fill_brewer(palette = "Set2") +
+    ggplot2::theme_minimal(base_size = 13) +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                   legend.position = "top",
+                   plot.background = ggplot2::element_rect(fill = "white", color = NA),
+                   panel.background = ggplot2::element_rect(fill = "white", color = NA))
+}
+
+#' Print a \code{qa_diagnose} Result
+#'
+#' A formatted summary: the final selected predictors, the bootstrapped
+#' \eqn{R^2_{y,d}} and \eqn{\rho^*} with their 95\% CIs.
+#'
+#' @param x A list returned by \code{\link{qa_diagnose}}.
+#' @param ... Ignored; present for S3 method consistency.
+#'
+#' @export
+print.qa_diagnose <- function(x, ...) {
+  cat("<qa_diagnose result>\n")
+  cat(sprintf("  Selected predictors: %s\n", paste(x$selected_predictors, collapse = ", ")))
+  cat(sprintf("  Predictors removed:  %d\n", length(x$removed_predictors)))
+  cat(sprintf("  R^2_y,d: mean = %.4f, 95%% CI [%.4f, %.4f]\n",
+              x$R2_y_donor$mean, x$R2_y_donor$ci_lower, x$R2_y_donor$ci_upper))
+  cat("\n  rho*:\n")
+  rho_table <- data.frame(
+    z_var    = names(x$rho_star$mean),
+    mean     = round(x$rho_star$mean, 4),
+    ci_lower = round(x$rho_star$ci_lower, 4),
+    ci_upper = round(x$rho_star$ci_upper, 4)
+  )
+  print(rho_table, row.names = FALSE)
+  cat("\nUse plot(x) for the top S(z_k) pairs, x$S_table for every pair.\n")
+  invisible(x)
 }

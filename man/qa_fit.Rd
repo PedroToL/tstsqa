@@ -11,9 +11,7 @@ qa_fit(
   x_vars,
   outcome_scale = c("log", "level"),
   n_grid = 200,
-  donor_weights = NULL,
-  plotting = FALSE,
-  annotate_p = NULL
+  donor_weights = NULL
 )
 }
 \arguments{
@@ -50,23 +48,9 @@ quantiles in the donor sample. Defaults to \code{NULL}, i.e. uniform
 weights (unweighted quantiles). Weights need not sum to any particular
 value; any positive common scale is equivalent, since quantiles are
 scale-invariant to rescaling of the weights.}
-
-\item{plotting}{Logical, default \code{FALSE}. If \code{TRUE}, additionally
-builds a \code{ggplot2} plot of the estimated quantile gap
-\eqn{\hat\eta(p)}: the raw (noisy) grid-point estimates as points, and
-the fitted smoothing spline as a line, returned as \code{eta_plot}.
-Requires the \code{ggplot2} package to be installed; \code{ggplot2} is
-listed under \code{Suggests} rather than \code{Imports} so it is not a
-hard dependency for users who never request a plot.}
-
-\item{annotate_p}{Optional single numeric in \eqn{(0,1)}, used only when
-\code{plotting = TRUE}. If supplied, the plot marks
-\eqn{\hat\eta(\code{annotate\_p})} (read off the fitted spline) with a
-point, a dropline to zero, and a text label.
-Defaults to \code{NULL} (no annotation).}
 }
 \value{
-A list with components:
+A list (class \code{"qa_fit"}) with components:
   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
   \item{donor_resid}{Donor in-sample residuals on the model scale.}
   \item{eta_spline}{A callable function, \code{eta_spline(p)}, giving the
@@ -90,8 +74,9 @@ A list with components:
     scale if \code{"level"}).}
   \item{y_adjusted}{Final quantile-adjusted outcome for the target sample,
     always on the level (original) scale.}
-  \item{eta_plot}{A \code{ggplot} object showing the raw and smoothed
-    \eqn{\hat\eta(p)} curve, or \code{NULL} if \code{plotting = FALSE}.}
+
+Use \code{plot()} on the returned object for the \eqn{\hat\eta(p)} curve,
+and \code{print()} for a formatted one-line summary.
 }
 \description{
 Fits a first-stage prediction model in the donor sample, constructs the

@@ -150,18 +150,13 @@ test_that("n_grid validation fires for too-small, non-integer, non-scalar", {
                "at least 4")
 })
 
-test_that("annotate_p validation fires when plotting = TRUE", {
+test_that("annotate_p validation fires in plot.qa_fit()", {
   skip_if_not_installed("ggplot2")
   d <- make_toy_data()
-  expect_error(qa_fit(d$donor, d$target, "y", "X",
-                                    plotting = TRUE, annotate_p = 1.5),
-               "strictly between 0 and 1")
-  expect_error(qa_fit(d$donor, d$target, "y", "X",
-                                    plotting = TRUE, annotate_p = 0),
-               "strictly between 0 and 1")
-  expect_error(qa_fit(d$donor, d$target, "y", "X",
-                                    plotting = TRUE, annotate_p = c(0.1, 0.9)),
-               "strictly between 0 and 1")
+  result <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X"))
+  expect_error(plot(result, annotate_p = 1.5), "strictly between 0 and 1")
+  expect_error(plot(result, annotate_p = 0), "strictly between 0 and 1")
+  expect_error(plot(result, annotate_p = c(0.1, 0.9)), "strictly between 0 and 1")
 })
 
 # ---------------------------------------------------------------------------
@@ -190,13 +185,8 @@ test_that("annotate_p outside the estimated grid range warns", {
       if (grepl("common support", conditionMessage(w))) invokeRestart("muffleWarning")
     })
   }
-  expect_warning(
-    suppress_common_support(
-      qa_fit(d$donor, d$target, "y", "X", n_grid = 4,
-                           plotting = TRUE, annotate_p = 0.999)
-    ),
-    "extrapolation"
-  )
+  result <- suppress_common_support(qa_fit(d$donor, d$target, "y", "X", n_grid = 4))
+  expect_warning(plot(result, annotate_p = 0.999), "extrapolation")
 })
 test_that("target level absent from donor is rejected upfront", {
   d <- make_toy_data()
@@ -228,17 +218,25 @@ test_that("donor level absent from target warns but does not stop", {
 # Plotting
 # ---------------------------------------------------------------------------
 
-test_that("plotting = TRUE returns a ggplot object", {
+test_that("plot() on a qa_fit result returns a ggplot object", {
   skip_if_not_installed("ggplot2")
   d <- make_toy_data()
-  result <- suppressWarnings(qa_fit(
-    d$donor, d$target, "y", "X", plotting = TRUE, annotate_p = 0.5
-  ))
-  expect_s3_class(result$eta_plot, "ggplot")
+  result <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X"))
+  p <- plot(result, annotate_p = 0.5)
+  expect_s3_class(p, "ggplot")
 })
 
-test_that("plotting = FALSE returns NULL for eta_plot", {
+test_that("plot() works without annotate_p", {
+  skip_if_not_installed("ggplot2")
   d <- make_toy_data()
   result <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X"))
-  expect_null(result$eta_plot)
+  p <- plot(result)
+  expect_s3_class(p, "ggplot")
+})
+
+test_that("qa_fit result has class qa_fit and a working print method", {
+  d <- make_toy_data()
+  result <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X"))
+  expect_s3_class(result, "qa_fit")
+  expect_output(print(result), "qa_fit result")
 })

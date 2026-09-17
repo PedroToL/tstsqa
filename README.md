@@ -62,13 +62,12 @@ y <- exp(1 + 0.8 * X + rnorm(n, sd = 1.5))   # substantial unexplained variance
 donor  <- data.frame(y = y[1:2500], X = X[1:2500])
 target <- data.frame(X = X[2501:5000])
 
-result <- qa_fit(donor, target, y_var = "y", x_vars = "X", outcome_scale = "log",
-                  plotting = TRUE, annotate_p = 0.9)
+result <- qa_fit(donor, target, y_var = "y", x_vars = "X", outcome_scale = "log")
 
 head(result$y_adjusted)
 #> [1]  0.867  7.353  0.831  1.082 10.041  1.187
 
-result$eta_plot
+plot(result, annotate_p = 0.9)
 ```
 
 <p align="center">
@@ -76,10 +75,10 @@ result$eta_plot
 </p>
 
 `result$y_adjusted` holds the corrected imputed values for the target
-sample. `result$eta_plot` (above) shows the quantile-gap function
-$\hat\eta(p)$ that produced them: the raw grid estimates as points, the
-smoothed curve used internally, and, since `annotate_p = 0.9`, the exact
-adjustment applied at the 90th percentile.
+sample. `plot(result, annotate_p = 0.9)` (above) shows the quantile-gap
+function $\hat\eta(p)$ that produced them: the raw grid estimates as
+points, the smoothed curve used internally, and, since `annotate_p = 0.9`,
+the exact adjustment applied at the 90th percentile.
 
 ### 2. Screen predictors and estimate the regime with `qa_diagnose()`
 
@@ -103,7 +102,7 @@ target2 <- data.frame(X1 = X1[5001:10000], X2 = X2[5001:10000], X3 = X3[5001:100
                        z1 = z1[5001:10000], z2 = z2[5001:10000])
 
 diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
-                          x_vars = c("X1", "X2", "X3"), B = 30, plotting = TRUE)
+                          x_vars = c("X1", "X2", "X3"), B = 30)
 #> Outcome scale: log
 #> ========== Variable Selection ==========
 #>
@@ -144,7 +143,7 @@ diagnosis <- qa_diagnose(donor2, target2, y_var = "y", z_vars = c("z1", "z2"),
 #>     z1 0.1073   0.0946   0.1213
 #>     z2 0.6395   0.6072   0.6709
 
-diagnosis$S_plot
+plot(diagnosis)
 ```
 
 <p align="center">
@@ -153,10 +152,14 @@ diagnosis$S_plot
 
 `X2` gets screened out: it inflates the correction for `z1` far more than
 it improves the fit for `y`. `X1` and `X3` survive, both comfortably under
-the screening thresholds shown as dashed lines. `diagnosis$R2_y_donor` and
-`diagnosis$rho_star` each hold `mean`/`ci_lower`/`ci_upper`: the first-stage
-fit quality and, for each `z`, the residual correlation at which the
-adjustment would exactly recover the true covariance.
+the screening thresholds shown as dashed lines. `plot(diagnosis)` shows the
+top 5 pairs by default (`n =` to show more or fewer); `diagnosis$S_table`
+holds every (predictor, z) pair among the survivors, not just what's
+plotted. `diagnosis$R2_y_donor` and `diagnosis$rho_star` each hold
+`mean`/`ci_lower`/`ci_upper`: the first-stage fit quality and, for each
+`z`, the residual correlation at which the adjustment would exactly
+recover the true covariance. `print(diagnosis)` gives a formatted summary
+of all of this at once.
 
 ### 3. Refit explicitly on the selected predictors
 
@@ -171,9 +174,9 @@ donor_holdout <- donor2[2501:5000, ]
 
 final_fit <- qa_fit(donor_train, donor_holdout, y_var = "y",
                      x_vars = diagnosis$selected_predictors,
-                     outcome_scale = "log", plotting = TRUE, annotate_p = 0.9)
+                     outcome_scale = "log")
 
-final_fit$eta_plot
+plot(final_fit, annotate_p = 0.9)
 ```
 
 <p align="center">

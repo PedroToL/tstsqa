@@ -31,7 +31,7 @@ test_that("the predictor that only explains z (not y) gets removed", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    outcome_scale = "log", tau = 10, B = 20, verbose = FALSE
+    outcome_scale = "log", tau = 10, B = 20, verbose = 0
   ))
 
   expect_false("X2" %in% result$selected_predictors)
@@ -43,7 +43,7 @@ test_that("output structure is internally consistent", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, verbose = FALSE
+    B = 20, verbose = 0
   ))
 
   expect_true(all(c("X1", "X3") %in% result$selected_predictors))
@@ -55,12 +55,12 @@ test_that("output structure is internally consistent", {
   expect_named(result$rho_star$ci_upper, c("z1", "z2"))
 })
 
-test_that("verbose = TRUE prints the documented progress messages", {
+test_that("verbose = 2 prints the documented progress messages", {
   d <- make_toy_data()
   expect_output(
     suppressWarnings(qa_diagnose(
       d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-      B = 5, verbose = TRUE
+      B = 5, verbose = 2
     )),
     "Removing 'X2'"
   )
@@ -72,7 +72,7 @@ test_that("factor x_vars are accepted (not just numeric)", {
   d$target$region <- factor(sample(c("A", "B", "C"), nrow(d$target), replace = TRUE))
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"),
-    x_vars = c("X1", "X2", "X3", "region"), B = 5, verbose = FALSE
+    x_vars = c("X1", "X2", "X3", "region"), B = 5, verbose = 0
   ))
   expect_true(is.list(result))
 })
@@ -82,7 +82,7 @@ test_that("z_vars must still be numeric (factor z is rejected with a clear error
   d$target$z1 <- factor(d$target$z1 > 0)
   expect_error(
     qa_diagnose(d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"),
-                 x_vars = c("X1", "X2", "X3"), B = 5, verbose = FALSE),
+                 x_vars = c("X1", "X2", "X3"), B = 5, verbose = 0),
     "must be numeric"
   )
 })
@@ -91,12 +91,12 @@ test_that("outcome_scale is printed as the very first line", {
   out <- capture.output(
     suppressWarnings(qa_diagnose(
       d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-      B = 5, verbose = TRUE, outcome_scale = "log"
+      B = 5, verbose = 2, outcome_scale = "log"
     ))
   )
   expect_equal(out[1], "Outcome scale: log")
 })
-test_that("S_plot never shows more than 5 bars, even with more available pairs", {
+test_that("S_table has every pair, but plot() shows no more than 5 bars", {
   skip_if_not_installed("ggplot2")
   set.seed(3)
   n <- 3000
@@ -110,8 +110,15 @@ test_that("S_plot never shows more than 5 bars, even with more available pairs",
                         X4 = X4[1501:3000], z1 = z1[1501:3000], z2 = z2[1501:3000])
   result <- suppressWarnings(qa_diagnose(donor, target, y_var = "y", z_vars = c("z1", "z2"),
                                            x_vars = c("X1", "X2", "X3", "X4"),
-                                           B = 10, verbose = FALSE, plotting = TRUE))
-  expect_lte(nrow(result$S_plot$data), 5)
+                                           B = 10, verbose = 0))
+  # Full table has every (predictor, z_var) pair among survivors
+  expect_equal(nrow(result$S_table), length(result$selected_predictors) * 2)
+  # plot() defaults to showing only the top 5
+  p <- plot(result)
+  expect_lte(nrow(p$data), 5)
+  # explicit n overrides the default
+  p3 <- plot(result, n = 3)
+  expect_lte(nrow(p3$data), 3)
 })
 
 test_that("donor_weights runs end-to-end and changes the result", {
@@ -119,10 +126,10 @@ test_that("donor_weights runs end-to-end and changes the result", {
   set.seed(99)
   w <- runif(nrow(d$donor), 0.5, 2)
   result_unweighted <- suppressWarnings(qa_diagnose(
-    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = FALSE
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
   ))
   result_weighted <- suppressWarnings(qa_diagnose(
-    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = FALSE,
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0,
     donor_weights = w
   ))
   expect_true(is.list(result_weighted))
@@ -230,11 +237,11 @@ test_that("subsample_cap controls the bootstrap draw size", {
   # Just confirm the parameter is accepted and validated.
   expect_error(
     qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"),
-                 subsample_cap = -1, verbose = FALSE),
+                 subsample_cap = -1, verbose = 0),
     "subsample_cap must be"
   )
   result <- suppressWarnings(qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"),
-                                           B = 5, verbose = FALSE, subsample_cap = Inf))
+                                           B = 5, verbose = 0, subsample_cap = Inf))
   expect_true(is.list(result))
 })
 
@@ -262,7 +269,7 @@ test_that("small B triggers a warning but still runs", {
   expect_warning(
     suppress_common_support(
       qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"),
-                                 B = 5, verbose = FALSE)
+                                 B = 5, verbose = 0)
     ),
     "quite small"
   )
@@ -272,7 +279,7 @@ test_that("target level absent from donor is rejected upfront (before any bootst
   d$donor$region  <- factor(sample(c("A", "B"), nrow(d$donor), replace = TRUE))
   d$target$region <- factor(sample(c("A", "B", "C"), nrow(d$target), replace = TRUE))  # "C" unseen by donor
   expect_error(
-    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "region"), verbose = FALSE),
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "region"), verbose = 0),
     "not present in donor_data"
   )
 })
@@ -290,7 +297,7 @@ test_that("a rare factor level unlucky in one bootstrap subsample does not crash
 
   result <- tryCatch({
     suppressWarnings(qa_diagnose(donor, target, y_var = "y", z_vars = "z1",
-                                   x_vars = c("X1", "region"), B = 10, verbose = FALSE,
+                                   x_vars = c("X1", "region"), B = 10, verbose = 0,
                                    subsample_cap = Inf))
     "ok"
   }, error = function(e) conditionMessage(e))
@@ -301,32 +308,35 @@ test_that("a rare factor level unlucky in one bootstrap subsample does not crash
 # Plotting
 # ---------------------------------------------------------------------------
 
-test_that("plotting = TRUE returns a ggplot object", {
+test_that("plot() on a qa_diagnose result returns a ggplot object", {
   skip_if_not_installed("ggplot2")
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, verbose = FALSE, plotting = TRUE
+    B = 20, verbose = 0
   ))
-  expect_s3_class(result$S_plot, "ggplot")
+  expect_s3_class(plot(result), "ggplot")
 })
 
-test_that("S_plot has no error bars", {
+test_that("plot() has no error bars", {
   skip_if_not_installed("ggplot2")
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, verbose = FALSE, plotting = TRUE
+    B = 20, verbose = 0
   ))
-  layer_classes <- vapply(result$S_plot$layers, function(l) class(l$geom)[1], character(1))
+  p <- plot(result)
+  layer_classes <- vapply(p$layers, function(l) class(l$geom)[1], character(1))
   expect_false("GeomErrorbar" %in% layer_classes)
 })
 
-test_that("plotting = FALSE returns NULL for S_plot", {
+test_that("qa_diagnose result has class qa_diagnose and a working print method", {
   d <- make_toy_data()
   result <- suppressWarnings(qa_diagnose(
     d$donor, d$target, y_var = "y", z_vars = c("z1", "z2"), x_vars = c("X1", "X2", "X3"),
-    B = 20, verbose = FALSE
+    B = 20, verbose = 0
   ))
-  expect_null(result$S_plot)
+  expect_s3_class(result, "qa_diagnose")
+  expect_output(print(result), "qa_diagnose result")
+  expect_output(print(result), "rho")
 })

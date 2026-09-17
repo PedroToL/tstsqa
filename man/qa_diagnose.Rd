@@ -16,8 +16,7 @@ qa_diagnose(
   n_grid = 200,
   subsample_cap = 5000,
   donor_weights = NULL,
-  verbose = TRUE,
-  plotting = FALSE
+  verbose = 2
 )
 }
 \arguments{
@@ -89,26 +88,25 @@ bootstrapped, the corresponding weights are resampled using the
 identical drawn indices, so they stay aligned with whichever rows were
 actually sampled. Defaults to \code{NULL} (uniform weights).}
 
-\item{verbose}{Logical, default \code{TRUE}. If \code{TRUE}, prints
-progress and results at each step (see Details). Set to \code{FALSE}
-for silent operation.}
-
-\item{plotting}{Logical, default \code{FALSE}. If \code{TRUE}, builds a
-\code{ggplot2} horizontal bar chart of the final \eqn{S_i(z_k)} mean
-values for the surviving predictors, with reference lines at
-\eqn{\tau = 5} and \eqn{\tau = 10}, returned as \code{S_plot}. Requires
-the \code{ggplot2} package to be installed; listed under
-\code{Suggests} rather than \code{Imports} so it is not a hard
-dependency for users who never request a plot.}
+\item{verbose}{Integer: \code{0} for silent operation, \code{1} to print
+only progress (section headers and bootstrap progress/ETA), or
+\code{2} (default) for the full print described in Details (adds
+per-iteration variable lists, the top-5 \eqn{S_i(z_k)} table, removal/
+convergence messages, and the final \eqn{R^2_{y,d}}/\eqn{\rho^*} table).}
 }
 \value{
-A list with components:
+A list (class \code{"qa_diagnose"}) with components:
   \item{selected_predictors}{Character vector of predictors that
     survived Variable Selection; the final predictor set.}
   \item{removed_predictors}{A list of removal events, each with the
     iteration number, the removed predictor, the \code{z_var} that
     triggered removal, and the bootstrap mean/95\% CI of \eqn{S} at the
     time of removal.}
+  \item{S_table}{Data frame of every (predictor, z_var) pair among the
+    final survivors, with \code{mean_S}, \code{ci_lower}, and
+    \code{ci_upper} (from the last Variable Selection iteration), ordered
+    highest to lowest \code{mean_S}. \code{plot()} shows only the top few
+    rows; use this directly for the complete table.}
   \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
     \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
     final predictor set.}
@@ -118,8 +116,9 @@ A list with components:
   \item{qa_fit}{The full return value of the
     \code{\link{qa_fit}} call on the final predictor set, fit on the
     full (non-subsampled) data.}
-  \item{S_plot}{A \code{ggplot} object (see \code{plotting} above), or
-    \code{NULL} if \code{plotting = FALSE}.}
+
+Use \code{plot()} on the returned object for the top \eqn{S_i(z_k)}
+pairs, and \code{print()} for a formatted summary.
 }
 \description{
 Implements Section 5.4 of Torres-Lopez, "Bias Reduction in TSTSLS
@@ -160,13 +159,14 @@ subsample, from which the realised quantile-gap adjustment
 is called once more on the FULL data (not a subsample), giving the actual
 adjustment applied to the whole target sample.
 
-When \code{verbose = TRUE} (the default), progress and results are
-printed at each step: active predictors and bootstrap progress
-(with percentage and ETA) per Variable Selection iteration, a message
-whenever a predictor is dropped, the top 5 \eqn{S_i(z_k)} pairs (mean
-and 95\% CI) per iteration, a convergence message, then Final
-Estimation's own bootstrap progress and the resulting \eqn{R^2_{y,d}}
-and \eqn{\rho^*} (mean and 95\% CI).
+\code{verbose} controls how much of this is printed as it happens (see
+the \code{verbose} parameter below); \code{1} shows section headers and
+bootstrap progress with percentage and ETA, and \code{2} additionally
+shows active predictors per iteration, a message whenever a predictor is
+dropped, the top 5 \eqn{S_i(z_k)} pairs (mean and 95\% CI) per iteration,
+a convergence message, and the final \eqn{R^2_{y,d}} and \eqn{\rho^*}
+(mean and 95\% CI). Regardless of \code{verbose}, the full results are
+always available afterward via \code{print()} on the returned object.
 }
 \examples{
 \dontrun{
