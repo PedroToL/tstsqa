@@ -479,15 +479,18 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   }
 
   # --- Input validation: tau, B, n_grid ------------------------------------
+  # NOTE on ordering: the "B is quite small" warning below is deliberately
+  # deferred until AFTER every hard input check. It is advice about a tuning
+  # choice, not a validity problem, and emitting it first meant a call with
+  # both a small B and genuinely invalid input (mismatched weights, say)
+  # raised the warning before erroring out -- noise attached to a call that
+  # was never going to run. Errors now come first; the warning fires only
+  # once the inputs are known to be usable.
   if (!is.numeric(tau) || length(tau) != 1 || tau <= 0) {
     stop("tau must be a single positive numeric value.")
   }
   if (!is.numeric(B) || length(B) != 1 || B != round(B) || B < 2) {
     stop("B must be a single integer of at least 2.")
-  }
-  if (B < 10) {
-    warning(sprintf("B = %d is quite small; bootstrap means and 95%% CIs may be unreliable. ",
-                     B), "Consider B >= 100 for stable results.")
   }
   if (!is.numeric(n_grid) || length(n_grid) != 1 || n_grid != round(n_grid) || n_grid < 4) {
     stop("n_grid must be a single integer of at least 4.")
@@ -523,6 +526,13 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   # --- Input validation: verbose ------------------------------------------
   if (!is.numeric(verbose) || length(verbose) != 1 || !(verbose %in% c(0, 1, 2))) {
     stop("verbose must be a single value: 0 (silent), 1 (progress only), or 2 (full print).")
+  }
+
+  # All hard input checks have now passed, so a small-B warning is advice
+  # about a run that will actually happen (see ordering note above).
+  if (B < 10) {
+    warning(sprintf("B = %d is quite small; bootstrap means and 95%% CIs may be unreliable. ",
+                     B), "Consider B >= 100 for stable results.")
   }
 
   active <- x_vars

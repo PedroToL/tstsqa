@@ -155,11 +155,14 @@ it improves the fit for `y`. `X1` and `X3` survive, both comfortably under
 the screening thresholds shown as dashed lines. `plot(diagnosis)` shows the
 top 5 pairs by default (`n =` to show more or fewer); `diagnosis$S_table`
 holds every (predictor, z) pair among the survivors, not just what's
-plotted. `diagnosis$R2_y_donor` and `diagnosis$rho_star` each hold
-`mean`/`ci_lower`/`ci_upper`: the first-stage fit quality and, for each
-`z`, the residual correlation at which the adjustment would exactly
-recover the true covariance. `print(diagnosis)` gives a formatted summary
-of all of this at once.
+plotted. `diagnosis$R2_y_donor`, `diagnosis$cov_yhat_eta` and, for each `z`,
+`diagnosis$rho_star` and `diagnosis$cov_eta_z` each hold
+`mean`/`ci_lower`/`ci_upper`: the first-stage fit quality, the covariance
+between the prediction and the adjustment, the residual correlation at which
+the adjustment would exactly recover the true covariance, and the covariance
+the adjustment actually restores. `print(diagnosis)` gives a formatted
+summary, including the last two, which the console output above does not
+show.
 
 ### 3. Refit explicitly on the selected predictors
 
