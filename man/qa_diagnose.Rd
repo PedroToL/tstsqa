@@ -136,6 +136,58 @@ A list (class \code{"qa_diagnose"}) with components:
     \mathrm{Var}(\tilde\eta) + 2\,\mathrm{Cov}(\hat y, \tilde\eta)}
     holds, so this is the cross term in the variance the adjustment
     restores. Weighted by \code{target_weights} when supplied.}
+  \item{cov_eta_z}{A list with \code{mean}, \code{ci_lower},
+    \code{ci_upper} and \code{sign_share}, each a named vector (one entry
+    per \code{z_vars}): the bootstrapped target-sample covariance between
+    the realised quantile gap and observed \eqn{z_k},
+    \eqn{\mathrm{Cov}(\tilde\eta, z_k)}. This is the covariance the
+    adjustment restores and is \eqn{\rho^*}'s numerator. It requires no
+    assumption about \eqn{g(\mathbf{X})}: \eqn{\tilde\eta} comes from
+    the \code{qa_fit} call on the target and \eqn{z_k} is observed
+    there, so both are moments of the same sample. \code{sign_share} is
+    the fraction of bootstrap draws agreeing in sign with the mean.
+    Weighted by \code{target_weights} when supplied.}
+  \item{linearity_check}{A list of named vectors (one entry per
+    \code{z_vars}) flagging the two assumptions behind the
+    predictor-channel factorisation, which fail independently.
+    \code{gap_gbar_linear_pct} is the percentage gap between
+    \eqn{\theta_k\,\mathrm{Cov}(\hat y, \tilde\eta)} and
+    \eqn{\mathrm{Cov}(\tilde\eta, \hat g(\mathbf{X}))}; both use the
+    same \eqn{\hat g}, so it isolates curvature in \eqn{\bar g}
+    (condition (iii)) and goes to zero under joint normality of
+    \eqn{\mathbf{X}}. \code{gap_index_reduction_pct} is the gap between
+    \eqn{\mathrm{Cov}(\tilde\eta, \hat g(\mathbf{X}))} and
+    \eqn{\mathrm{Cov}(\tilde\eta, z_k)} with raw \eqn{z_k}, which
+    measures whether the linear projection stands in for
+    \eqn{E[z_k \mid \mathbf{X}]} -- typically large for a binary
+    \eqn{z_k} fitted by OLS. \code{cov_eta_z} is that raw-\eqn{z_k}
+    covariance, and \code{sign_agrees} records whether the factorised
+    channel and it share a sign. A large \code{gap_gbar_linear_pct}
+    invalidates the channel's magnitude but not its sign, since
+    \eqn{\mathrm{Cov}(\hat y, \tilde\eta) \ge 0}. Neither gap bears on
+    \eqn{\lambda}, whose denominator \eqn{\mathrm{Cov}(\varepsilon,
+    z)} is not estimable in a genuine TSTS application.}
+  \item{theta}{A list with \code{mean}, \code{ci_lower}, \code{ci_upper}
+    and \code{sign_share}, each a named vector (one entry per
+    \code{z_vars}): the slope of \eqn{\bar g} on predicted income,
+    \eqn{\theta_k = \mathrm{Cov}(g(\mathbf{X}), \hat y) /
+    \mathrm{Var}(\hat y)}, which under the linear-projection conditions
+    equals \eqn{\gamma'\Sigma\beta / \beta'\Sigma\beta}.
+    \code{sign_share} is the fraction of bootstrap draws agreeing in sign
+    with the mean, so values near 1 indicate a stable sign and values near
+    0.5 indicate the sign is not pinned down.}
+  \item{predictor_channel}{A list with \code{mean}, \code{ci_lower},
+    \code{ci_upper} (the factorised channel \eqn{\theta_k\,
+    \mathrm{Cov}(\hat y, \tilde\eta)}), plus \code{direct_mean},
+    \code{direct_ci_lower}, \code{direct_ci_upper} (the same quantity
+    computed directly as \eqn{\mathrm{Cov}(\tilde\eta,
+    g(\mathbf{X}))}) and \code{sign_agrees}. The two forms coincide only
+    when \eqn{\bar g} is linear in predicted income, which requires
+    \eqn{\mathbf{X}} jointly normal or elliptical and generally fails
+    with factor or bounded predictors; the gap between them measures that
+    failure, while \code{sign_agrees} records whether the sign rule still
+    holds. Both are oracle-free, so unlike \eqn{\lambda} they are
+    available in a genuine TSTS application.}
   \item{qa_fit}{The full return value of the
     \code{\link{qa_fit}} call on the final predictor set, fit on the
     full (non-subsampled) data.}

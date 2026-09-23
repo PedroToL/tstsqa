@@ -121,14 +121,17 @@ test_that("S_table has every pair, but plot() shows no more than 5 bars", {
   expect_lte(nrow(p3$data), 3)
 })
 
-test_that("donor_weights runs end-to-end, leaves R2_y_donor unaffected, but still moves rho_star", {
+test_that("donor_weights runs end-to-end and now moves both R2_y_donor and rho_star", {
   d <- make_toy_data()
   set.seed(1)
   w <- runif(nrow(d$donor), 0.5, 2)
 
-  # R2_y_donor is now always unweighted by design (the first-stage fit is
-  # never weighted, and its R^2 is a plain cor()^2); with the SAME bootstrap
-  # draws (matched seed), weighted and unweighted calls must agree exactly.
+  # The first stage is now fit WEIGHTED when donor_weights is supplied, and
+  # R^2_{y,d} is the weighted R^2 of that fit, so both it and rho_star
+  # respond to weighting. (An earlier version fit unweighted and computed an
+  # unweighted R^2, so R2_y_donor was invariant to donor_weights; that was
+  # changed because an unweighted fit leaves Cov_weighted(eps, X) nonzero,
+  # which breaks lambda = rho*/rho.)
   set.seed(99)
   result_unweighted <- suppressWarnings(qa_diagnose(
     d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
@@ -139,13 +142,27 @@ test_that("donor_weights runs end-to-end, leaves R2_y_donor unaffected, but stil
     donor_weights = w
   ))
   expect_true(is.list(result_weighted))
-  expect_equal(result_unweighted$R2_y_donor$mean, result_weighted$R2_y_donor$mean)
-
-  # rho_star DOES still respond to donor_weights, since donor_weights enters
-  # the quantile step inside qa_fit() (which feeds eta into rho_star), even
-  # though it no longer enters R2_y_donor.
+  expect_false(isTRUE(all.equal(result_unweighted$R2_y_donor$mean,
+                                  result_weighted$R2_y_donor$mean)))
   expect_false(isTRUE(all.equal(result_unweighted$rho_star$mean,
                                   result_weighted$rho_star$mean)))
+})
+
+test_that("uniform weights reproduce the unweighted fit exactly", {
+  # The guarantee that makes the weighted-fit change backward compatible:
+  # passing rep(1, n) to lm()/glm() is identical to passing nothing.
+  d <- make_toy_data()
+  set.seed(5)
+  a <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0
+  ))
+  set.seed(5)
+  b <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0,
+    donor_weights = rep(1, nrow(d$donor)), target_weights = rep(1, nrow(d$target))
+  ))
+  expect_equal(a$R2_y_donor$mean, b$R2_y_donor$mean)
+  expect_equal(a$rho_star$mean, b$rho_star$mean)
 })
 
 test_that("cov_yhat_eta is returned with mean and a percentile CI", {
@@ -201,6 +218,102 @@ test_that("print() shows Cov(y_hat, eta), and tolerates older results without it
   old_style <- result
   old_style$cov_yhat_eta <- NULL
   expect_output(print(old_style), "R\\^2_y,d")
+})
+
+test_that("theta and predictor_channel are returned per z_var", {
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  expect_named(r$theta$mean, c("z1", "z2"))
+  expect_named(r$predictor_channel$mean, c("z1", "z2"))
+  expect_true(all(is.finite(r$theta$mean)))
+  expect_true(all(r$theta$sign_share >= 0.5 & r$theta$sign_share <= 1))
+})
+
+test_that("predictor_channel equals theta times Cov(y_hat, eta)", {
+  # The appendix factorisation, checked on the bootstrap means. This is the
+  # construction, so it should hold to floating point.
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  # mean of a product is not the product of means, so compare loosely: the
+  # factorisation holds draw by draw, and both are averages over the same
+  # draws, so the means should be close but need not be identical.
+  expect_equal(unname(r$predictor_channel$mean),
+               unname(r$theta$mean * r$cov_yhat_eta$mean),
+               tolerance = 0.1)
+})
+
+test_that("the linear channel and the direct channel agree in sign", {
+  # theta * Cov(y_hat, eta) equals Cov(eta, g(X)) exactly only when gbar is
+  # linear in predicted income. Magnitudes can differ when that fails, but
+  # the sign rule the appendix relies on should still hold.
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  expect_true(all(r$predictor_channel$sign_agrees))
+})
+
+test_that("linearity_check returns both gaps per z_var", {
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  expect_named(r$linearity_check$gap_gbar_linear_pct, c("z1", "z2"))
+  expect_named(r$linearity_check$gap_index_reduction_pct, c("z1", "z2"))
+  expect_true(all(r$linearity_check$gap_gbar_linear_pct >= 0, na.rm = TRUE))
+  expect_true(all(r$linearity_check$gap_index_reduction_pct >= 0, na.rm = TRUE))
+})
+
+test_that("the gbar-linearity gap vanishes when X is jointly normal", {
+  # This is the point of separating the two gaps: condition (iii) holds
+  # under joint normality of X, so theta * Cov(y_hat, eta) should recover
+  # Cov(eta, g_hat) almost exactly. A large value here would mean the gap
+  # is not isolating gbar's curvature.
+  set.seed(11)
+  n <- 6000
+  X1 <- rnorm(n); X2 <- rnorm(n); u <- rnorm(n)
+  y  <- exp(9 + 0.7 * X1 + 0.5 * X2 + 0.9 * u)
+  z  <- 0.4 * X1 + 0.5 * X2 + 0.5 * u + rnorm(n, sd = 0.6)
+  dat <- data.frame(y = y, X1 = X1, X2 = X2, z = z)
+  r <- suppressWarnings(qa_diagnose(
+    dat, dat, "y", "z", c("X1", "X2"), B = 10, n_grid = 200,
+    subsample_cap = n, verbose = 0
+  ))
+  expect_lt(unname(r$linearity_check$gap_gbar_linear_pct["z"]), 2)
+})
+
+test_that("print() shows Cov(eta, z) and tolerates older results", {
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0
+  ))
+  expect_output(print(r), "Cov\\(eta, z\\)")
+  expect_output(print(r), "sign_share")
+  # theta, the factorised channel and the linearity gaps are still returned,
+  # just not printed
+  expect_true(!is.null(r$theta$mean))
+  expect_true(!is.null(r$predictor_channel$mean))
+  expect_true(!is.null(r$linearity_check$gap_gbar_linear_pct))
+  old_style <- r
+  old_style$cov_eta_z <- NULL
+  expect_output(print(old_style), "rho\\*")
+})
+
+test_that("cov_eta_z is rho*'s numerator, measured against raw z", {
+  # The point of reporting it directly: no g(X) assumption enters. Check it
+  # against the full-data qa_fit the diagnosis returns.
+  d <- make_toy_data()
+  r <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  eta <- r$qa_fit$eta_target
+  direct <- stats::cov(eta, d$target$z1)
+  expect_equal(unname(r$cov_eta_z$mean["z1"]), direct, tolerance = 0.5)
+  expect_true(all(r$cov_eta_z$sign_share >= 0.5 & r$cov_eta_z$sign_share <= 1))
 })
 
 test_that("uniform (even non-unit) weights reproduce the unweighted rho*", {

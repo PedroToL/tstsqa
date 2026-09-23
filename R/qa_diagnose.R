@@ -20,10 +20,15 @@
 #   data (not a subsample) is also returned, for the actual adjustment
 #   applied to the whole target sample.
 #
-#   Optional donor_weights/target_weights (survey/design weights) enter only
-#   where a population moment is estimated: the quantile step inside every
-#   qa_fit() call, and the rho* calculation. The first-stage fits,
-#   R^2_{y,d}, S_i(z_k), and the z_k ~ x_vars regressions are all unweighted.
+#   Optional donor_weights/target_weights (survey/design weights) are used
+#   EVERYWHERE the corresponding sample is involved: the lm()/glm()
+#   first-stage fits, R^2_{y,d}, S_i(z_k), the z_k ~ x_vars regressions in
+#   the target sample, the quantile step inside every qa_fit() call, and the
+#   rho*/theta/channel calculations. Weighted regression is the point: OLS
+#   forces Cov(eps, X) = 0 only in the metric the model was fit in, so an
+#   unweighted fit paired with weighted moments leaves Cov_weighted(eps, X)
+#   nonzero and breaks the lambda = rho*/rho identity. Uniform weights
+#   reproduce the unweighted results exactly.
 #
 # HARDENED -- current state:
 #   - Full input validation: types, required columns, numeric checks, no
@@ -51,44 +56,59 @@
 # then, callers of this file must source("R/qa_fit.R") first.
 
 # --- Small internal helper: fit the first stage and compute in-sample R^2 -
-# Neither the fit nor the R^2 is weighted. The first stage is a prediction
-# device whose coefficients are never interpreted, so it is fit unweighted
-# for efficiency, and R^2 is the ordinary functional of that fit. Survey
-# weights enter only where a population moment is estimated: the quantile
-# step inside qa_fit(), and the rho* calculation below.
-.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale) {
+# The fit IS weighted when weights are supplied, and the R^2 is then the
+# weighted one. An earlier version left both unweighted on the grounds that
+# the first stage is a prediction device, but that leaves Cov_weighted(eps,
+# X) nonzero (OLS only zeroes it in the metric it was fit in), which breaks
+# the lambda = rho*/rho identity the diagnostics rely on. Fitting weighted
+# keeps the fit, its R^2, and the population moments below all in one
+# metric. Uniform weights reproduce the unweighted result exactly.
+.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale, weights = NULL) {
+  if (is.null(weights)) weights <- rep(1, nrow(data))
   if (outcome_scale == "log") {
     y_model <- log(data[[y_var]])
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::lm(f, data = fit_data)
+    mod <- stats::lm(f, data = fit_data, weights = weights)
     y_hat <- stats::predict(mod, newdata = data)
   } else {
     y_model <- data[[y_var]]
     fit_data <- cbind(data, y_model)
     f <- stats::reformulate(x_vars, response = "y_model")
-    mod <- stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"))
+    mod <- stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"),
+                      weights = weights)
     y_hat <- stats::predict(mod, newdata = data, type = "response")
   }
-  # cor()^2 rather than summary(mod)$r.squared: identical for the OLS
-  # branch with an intercept, and a bounded pseudo-R^2 for the GLM branch,
-  # which has no r.squared slot.
-  r2 <- stats::cor(y_model, y_hat)^2
+  # Weighted squared correlation between the outcome and its fitted values.
+  # With uniform weights this is exactly cor(y_model, y_hat)^2, which in
+  # turn equals summary(mod)$r.squared for the OLS branch with an intercept;
+  # for the GLM branch, which has no r.squared slot, it is a bounded
+  # pseudo-R^2. Using the weighted version keeps R^2 consistent with the
+  # weighted fit that produced y_hat.
+  r2 <- .wcov(y_model, y_hat, weights)^2 /
+    (.wvar(y_model, weights) * .wvar(y_hat, weights))
   list(model = mod, y_model = y_model, y_hat = y_hat, r2 = r2)
 }
 
 
 
 # --- Small internal helper: single-pass S_i(z_k) matrix, in-sample --------
-.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale) {
+# donor_weights weights the donor-side first stage, target_weights the
+# target-side z_k ~ x_vars regressions, so both sides of S_i(z_k) are
+# estimated in the same metric as the population moments elsewhere.
+.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale,
+                               donor_weights = NULL, target_weights = NULL) {
 
-  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale)
+  if (is.null(target_weights)) target_weights <- rep(1, nrow(target_data))
+
+  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale, donor_weights)
   R2_y_full  <- fit_y_full$r2
 
   R2_z_full <- sapply(z_vars, function(z_k) {
     f_z <- stats::reformulate(active, response = z_k)
-    mod_z <- stats::lm(f_z, data = target_data)
-    stats::var(stats::fitted(mod_z)) / stats::var(target_data[[z_k]])
+    mod_z <- stats::lm(f_z, data = target_data, weights = target_weights)
+    .wvar(stats::fitted(mod_z), target_weights) /
+      .wvar(target_data[[z_k]], target_weights)
   })
   names(R2_z_full) <- z_vars
 
@@ -99,13 +119,14 @@
     for (i in active) {
       reduced <- setdiff(active, i)
 
-      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale)
+      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale, donor_weights)
       delta_y_i <- R2_y_full - fit_y_reduced$r2
 
       for (z_k in z_vars) {
         f_z_reduced <- stats::reformulate(reduced, response = z_k)
-        mod_z_reduced <- stats::lm(f_z_reduced, data = target_data)
-        R2_z_reduced <- stats::var(stats::fitted(mod_z_reduced)) / stats::var(target_data[[z_k]])
+        mod_z_reduced <- stats::lm(f_z_reduced, data = target_data, weights = target_weights)
+        R2_z_reduced <- .wvar(stats::fitted(mod_z_reduced), target_weights) /
+          .wvar(target_data[[z_k]], target_weights)
         delta_z_ik <- R2_z_full[z_k] - R2_z_reduced
 
         # Safeguard: delta_y_i == 0 exactly would otherwise give 0/0 = NaN or
@@ -303,6 +324,58 @@
 #'     \mathrm{Var}(\tilde\eta) + 2\,\mathrm{Cov}(\hat y, \tilde\eta)}
 #'     holds, so this is the cross term in the variance the adjustment
 #'     restores. Weighted by \code{target_weights} when supplied.}
+#'   \item{cov_eta_z}{A list with \code{mean}, \code{ci_lower},
+#'     \code{ci_upper} and \code{sign_share}, each a named vector (one entry
+#'     per \code{z_vars}): the bootstrapped target-sample covariance between
+#'     the realised quantile gap and observed \eqn{z_k},
+#'     \eqn{\mathrm{Cov}(\tilde\eta, z_k)}. This is the covariance the
+#'     adjustment restores and is \eqn{\rho^*}'s numerator. It requires no
+#'     assumption about \eqn{g(\mathbf{X})}: \eqn{\tilde\eta} comes from
+#'     the \code{qa_fit} call on the target and \eqn{z_k} is observed
+#'     there, so both are moments of the same sample. \code{sign_share} is
+#'     the fraction of bootstrap draws agreeing in sign with the mean.
+#'     Weighted by \code{target_weights} when supplied.}
+#'   \item{linearity_check}{A list of named vectors (one entry per
+#'     \code{z_vars}) flagging the two assumptions behind the
+#'     predictor-channel factorisation, which fail independently.
+#'     \code{gap_gbar_linear_pct} is the percentage gap between
+#'     \eqn{\theta_k\,\mathrm{Cov}(\hat y, \tilde\eta)} and
+#'     \eqn{\mathrm{Cov}(\tilde\eta, \hat g(\mathbf{X}))}; both use the
+#'     same \eqn{\hat g}, so it isolates curvature in \eqn{\bar g}
+#'     (condition (iii)) and goes to zero under joint normality of
+#'     \eqn{\mathbf{X}}. \code{gap_index_reduction_pct} is the gap between
+#'     \eqn{\mathrm{Cov}(\tilde\eta, \hat g(\mathbf{X}))} and
+#'     \eqn{\mathrm{Cov}(\tilde\eta, z_k)} with raw \eqn{z_k}, which
+#'     measures whether the linear projection stands in for
+#'     \eqn{E[z_k \mid \mathbf{X}]} -- typically large for a binary
+#'     \eqn{z_k} fitted by OLS. \code{cov_eta_z} is that raw-\eqn{z_k}
+#'     covariance, and \code{sign_agrees} records whether the factorised
+#'     channel and it share a sign. A large \code{gap_gbar_linear_pct}
+#'     invalidates the channel's magnitude but not its sign, since
+#'     \eqn{\mathrm{Cov}(\hat y, \tilde\eta) \ge 0}. Neither gap bears on
+#'     \eqn{\lambda}, whose denominator \eqn{\mathrm{Cov}(\varepsilon,
+#'     z)} is not estimable in a genuine TSTS application.}
+#'   \item{theta}{A list with \code{mean}, \code{ci_lower}, \code{ci_upper}
+#'     and \code{sign_share}, each a named vector (one entry per
+#'     \code{z_vars}): the slope of \eqn{\bar g} on predicted income,
+#'     \eqn{\theta_k = \mathrm{Cov}(g(\mathbf{X}), \hat y) /
+#'     \mathrm{Var}(\hat y)}, which under the linear-projection conditions
+#'     equals \eqn{\gamma'\Sigma\beta / \beta'\Sigma\beta}.
+#'     \code{sign_share} is the fraction of bootstrap draws agreeing in sign
+#'     with the mean, so values near 1 indicate a stable sign and values near
+#'     0.5 indicate the sign is not pinned down.}
+#'   \item{predictor_channel}{A list with \code{mean}, \code{ci_lower},
+#'     \code{ci_upper} (the factorised channel \eqn{\theta_k\,
+#'     \mathrm{Cov}(\hat y, \tilde\eta)}), plus \code{direct_mean},
+#'     \code{direct_ci_lower}, \code{direct_ci_upper} (the same quantity
+#'     computed directly as \eqn{\mathrm{Cov}(\tilde\eta,
+#'     g(\mathbf{X}))}) and \code{sign_agrees}. The two forms coincide only
+#'     when \eqn{\bar g} is linear in predicted income, which requires
+#'     \eqn{\mathbf{X}} jointly normal or elliptical and generally fails
+#'     with factor or bounded predictors; the gap between them measures that
+#'     failure, while \code{sign_agrees} records whether the sign rule still
+#'     holds. Both are oracle-free, so unlike \eqn{\lambda} they are
+#'     available in a genuine TSTS application.}
 #'   \item{qa_fit}{The full return value of the
 #'     \code{\link{qa_fit}} call on the final predictor set, fit on the
 #'     full (non-subsampled) data.}
@@ -484,10 +557,25 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
         .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
                                  b, B, 100 * b / B, .format_duration(eta)))
       }
-      donor_sub  <- .draw_subsample(donor_data,  subsample_cap)
-      target_sub <- .draw_subsample(target_data, subsample_cap)
+      if (is.null(donor_weights)) {
+        donor_sub <- .draw_subsample(donor_data, subsample_cap)
+        donor_weights_sub <- NULL
+      } else {
+        drawn <- .draw_subsample_with_weights(donor_data, donor_weights, subsample_cap)
+        donor_sub <- drawn$data
+        donor_weights_sub <- drawn$weights
+      }
+      if (is.null(target_weights)) {
+        target_sub <- .draw_subsample(target_data, subsample_cap)
+        target_weights_sub <- NULL
+      } else {
+        drawn_t <- .draw_subsample_with_weights(target_data, target_weights, subsample_cap)
+        target_sub <- drawn_t$data
+        target_weights_sub <- drawn_t$weights
+      }
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
-                                          active, outcome_scale)$S
+                                          active, outcome_scale,
+                                          donor_weights_sub, target_weights_sub)$S
     }
     if (verbose >= 1) cat("\n")
 
@@ -563,6 +651,10 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
   r2_boot  <- rep(NA_real_, B)
   rho_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
   cov_yhat_eta_boot <- rep(NA_real_, B)
+  theta_boot   <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
+  channel_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
+  channel_direct_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
+  cov_eta_z_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
   final_start_time <- Sys.time()
 
   for (b in seq_len(B)) {
@@ -590,13 +682,19 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       target_weights_sub <- drawn_t$weights
     }
 
-    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale)
+    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale, donor_weights_sub)
     r2_boot[b] <- fit_sub$r2
     eps_d_sub  <- fit_sub$y_model - fit_sub$y_hat
 
+    # z_k ~ x_vars in the target sample, weighted by target_weights so that
+    # z_perp is orthogonal to the predictors in the SAME metric the
+    # covariances below are computed in. Without this, Cov_weighted(eps, z)
+    # and Cov_weighted(eps, z_perp) diverge and rho* stops satisfying
+    # lambda = rho*/rho.
+    tw_fit <- if (is.null(target_weights_sub)) rep(1, nrow(target_sub)) else target_weights_sub
     z_perp_sub <- sapply(z_vars, function(z_k) {
       f_z <- stats::reformulate(active, response = z_k)
-      mod_z <- stats::lm(f_z, data = target_sub)
+      mod_z <- stats::lm(f_z, data = target_sub, weights = tw_fit)
       stats::residuals(mod_z)
     })
     colnames(z_perp_sub) <- z_vars
@@ -629,6 +727,60 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     # partly offsetting the prediction rather than adding to it. Weighted by
     # target_weights, since this is a target-sample population moment.
     cov_yhat_eta_boot[b] <- .wcov(qa_sub$y_hat_target, eta_sub, tw)
+
+    # --- Linear-projection diagnostics (appendix "The Linear Projection
+    # Case") ------------------------------------------------------------
+    # Under f(X) = beta'X, g(X) = gamma'X and a linear gbar, the slope of
+    # gbar on predicted income is
+    #     theta_k = gamma' Sigma beta / beta' Sigma beta
+    #             = Cov(g(X), y_hat) / Var(y_hat),
+    # and the predictor channel factorises as
+    #     Cov(eta, g(X)) = theta_k * Cov(y_hat, eta).
+    # Both are computed here from quantities the loop already has:
+    # g_hat = z_k - z_perp is the fitted part of z_k on the predictors
+    # (i.e. gamma'X), and y_hat comes from the same qa_fit() call as eta.
+    #
+    # This matters because it is ORACLE-FREE. Unlike lambda, whose
+    # denominator Cov(epsilon, z) is unobservable in a genuine TSTS
+    # application, theta_k and Cov(y_hat, eta) are both estimable from the
+    # donor and target samples alone. Since Cov(y_hat, eta) >= 0, the SIGN
+    # of the channel is the sign of theta_k, so sign(theta_k) predicts the
+    # direction in which the adjustment moves Cov(eta, z) before any
+    # validation data is seen. Mis-recovery is exactly the case where that
+    # sign opposes the sign of the omitted covariance.
+    #
+    # Weighted by target_weights throughout: Sigma, Cov(g(X), y_hat) and
+    # Var(y_hat) are all target-population moments.
+    var_yhat_sub <- .wvar(qa_sub$y_hat_target, tw)
+    theta_boot[b, ] <- sapply(z_vars, function(z_k) {
+      g_hat <- target_sub[[z_k]] - z_perp_sub[, z_k]
+      .wcov(g_hat, qa_sub$y_hat_target, tw) / var_yhat_sub
+    })
+    channel_boot[b, ] <- theta_boot[b, ] * cov_yhat_eta_boot[b]
+
+    # The channel computed DIRECTLY as Cov(eta, g(X)), without going through
+    # theta. The two agree exactly only under condition (iii) of the
+    # appendix -- gbar linear in predicted income -- which needs X jointly
+    # normal (or elliptical) and generally fails with factor and bounded
+    # predictors. Returning both makes the size of that failure measurable:
+    # theta captures only the component of gbar that is linear in y_hat, so
+    # the gap between channel_direct and predictor_channel is the part of
+    # gbar orthogonal to y_hat. Signs can be expected to agree even when
+    # magnitudes do not, which is what the sign rule of Equation
+    # (eq:app_sign) actually needs.
+    channel_direct_boot[b, ] <- sapply(z_vars, function(z_k) {
+      g_hat <- target_sub[[z_k]] - z_perp_sub[, z_k]
+      .wcov(eta_sub, g_hat, tw)
+    })
+
+    # Cov(eta, z) against RAW z, the quantity rho*'s numerator uses. Needed
+    # for the second of the two linearity gaps below: comparing it to
+    # channel_direct (which uses the fitted g_hat instead of z) isolates
+    # whether the linear projection of z on the predictors stands in for
+    # E[z | X]. For a binary z_k fitted by OLS it generally does not.
+    cov_eta_z_boot[b, ] <- sapply(z_vars, function(z_k) {
+      .wcov(eta_sub, target_sub[[z_k]], tw)
+    })
   }
   if (verbose >= 1) cat("\n")
 
@@ -648,6 +800,95 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     mean     = mean(cov_yhat_eta_boot, na.rm = TRUE),
     ci_lower = unname(stats::quantile(cov_yhat_eta_boot, 0.025, na.rm = TRUE)),
     ci_upper = unname(stats::quantile(cov_yhat_eta_boot, 0.975, na.rm = TRUE))
+  )
+
+  # theta: slope of gbar on predicted income, per z_k. sign_share is the
+  # fraction of bootstrap draws whose theta agrees in sign with the mean --
+  # a value near 1 means the predicted direction of the predictor channel is
+  # stable, near 0.5 means the sign is not pinned down by the data.
+  theta <- list(
+    mean       = colMeans(theta_boot, na.rm = TRUE),
+    ci_lower   = apply(theta_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+    ci_upper   = apply(theta_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE),
+    sign_share = sapply(z_vars, function(z_k) {
+      v <- theta_boot[, z_k]
+      v <- v[!is.na(v)]
+      if (length(v) == 0) return(NA_real_)
+      mean(sign(v) == sign(mean(v)))
+    })
+  )
+
+  # predictor_channel: theta_k * Cov(y_hat, eta), the appendix's prediction
+  # for Cov(eta, g(X)). Oracle-free, so its sign is available before any
+  # validation data.
+  # linearity_check: the two assumptions behind the appendix's factorisation
+  # of the predictor channel, each with its own gap, measured separately
+  # because they fail independently.
+  #
+  #   gap_gbar_linear_pct -- condition (iii), gbar linear in predicted
+  #     income. Compares theta * Cov(y_hat, eta) against Cov(eta, g_hat).
+  #     BOTH sides use the same g_hat, so the only thing that can separate
+  #     them is curvature in gbar. Goes to zero when X is jointly normal
+  #     (or elliptical) and stays near zero even when z is binary, since
+  #     that breaks a different assumption. A small gap licenses reading the
+  #     factorised channel as a magnitude; a large one does not, but leaves
+  #     the SIGN rule intact, since Cov(y_hat, eta) >= 0 makes
+  #     sign(channel) = sign(theta) whatever the shape of gbar.
+  #
+  #   gap_index_reduction_pct -- whether the linear projection g_hat stands
+  #     in for E[z | X]. Compares Cov(eta, g_hat) against Cov(eta, z) with
+  #     raw z. The index reduction Cov(eta, z) = Cov(eta, E[z|X]) is exact
+  #     when eta is X-measurable, but g_hat is the LINEAR projection, not
+  #     the conditional expectation; for a binary z_k fitted by OLS the two
+  #     differ. Large values here suggest fitting z_k ~ x_vars by logit
+  #     rather than OLS if the channel magnitude is to be reported.
+  #
+  # Gaps are computed from the bootstrap means rather than averaged over
+  # per-draw ratios, which would be unstable whenever a denominator is near
+  # zero. NA where the denominator is ~0 (no meaningful relative gap).
+  .rel_gap <- function(a, b) {
+    ifelse(abs(b) < .Machine$double.eps^0.5, NA_real_, 100 * abs(a - b) / abs(b))
+  }
+  channel_lin_mean    <- colMeans(channel_boot, na.rm = TRUE)
+  channel_direct_mean <- colMeans(channel_direct_boot, na.rm = TRUE)
+  cov_eta_z_mean      <- colMeans(cov_eta_z_boot, na.rm = TRUE)
+
+  linearity_check <- list(
+    cov_eta_z               = cov_eta_z_mean,
+    gap_gbar_linear_pct     = .rel_gap(channel_lin_mean, channel_direct_mean),
+    gap_index_reduction_pct = .rel_gap(channel_direct_mean, cov_eta_z_mean),
+    sign_agrees             = sign(channel_lin_mean) == sign(cov_eta_z_mean)
+  )
+
+  # Cov(eta, z): the covariance the adjustment actually restores, measured
+  # directly against observed z_k. This needs no assumption about g(X) at
+  # all -- eta comes from the qa_fit() call on the target and z_k is
+  # observed in the target, so both sides are sample moments of the same
+  # sample. It is also rho*'s numerator. sign_share is the fraction of
+  # bootstrap draws agreeing in sign with the mean: 1 means every draw
+  # agreed on the direction, 0.5 means the sign is not pinned down.
+  cov_eta_z <- list(
+    mean       = colMeans(cov_eta_z_boot, na.rm = TRUE),
+    ci_lower   = apply(cov_eta_z_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+    ci_upper   = apply(cov_eta_z_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE),
+    sign_share = sapply(z_vars, function(z_k) {
+      v <- cov_eta_z_boot[, z_k]
+      v <- v[!is.na(v)]
+      if (length(v) == 0) return(NA_real_)
+      mean(sign(v) == sign(mean(v)))
+    })
+  )
+
+  predictor_channel <- list(
+    mean     = colMeans(channel_boot, na.rm = TRUE),
+    ci_lower = apply(channel_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+    ci_upper = apply(channel_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE),
+    direct_mean = colMeans(channel_direct_boot, na.rm = TRUE),
+    direct_ci_lower = apply(channel_direct_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+    direct_ci_upper = apply(channel_direct_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE),
+    sign_agrees = sapply(z_vars, function(z_k)
+      sign(mean(channel_boot[, z_k], na.rm = TRUE)) ==
+        sign(mean(channel_direct_boot[, z_k], na.rm = TRUE)))
   )
 
   if (verbose >= 2) {
@@ -678,6 +919,10 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       R2_y_donor          = R2_y_donor,
       rho_star            = rho_star,
       cov_yhat_eta        = cov_yhat_eta,
+      cov_eta_z           = cov_eta_z,
+      theta               = theta,
+      predictor_channel   = predictor_channel,
+      linearity_check     = linearity_check,
       qa_fit              = qa_result
     ),
     class = "qa_diagnose"
@@ -760,6 +1005,24 @@ print.qa_diagnose <- function(x, ...) {
     ci_upper = round(x$rho_star$ci_upper, 4)
   )
   print(rho_table, row.names = FALSE)
+
+  # Cov(eta, z): the covariance the adjustment restores, measured directly
+  # against observed z_k. No assumption about g(X) enters. theta, the
+  # factorised predictor_channel and linearity_check are still computed and
+  # available on the object for the linear-case analysis, but are not
+  # printed -- Cov(eta, z) is what the adjustment is judged on. Guarded so
+  # results saved before this component existed still print.
+  if (!is.null(x$cov_eta_z)) {
+    cat("\n  Cov(eta, z):\n")
+    cov_table <- data.frame(
+      z_var      = names(x$cov_eta_z$mean),
+      mean       = round(x$cov_eta_z$mean, 5),
+      ci_lower   = round(x$cov_eta_z$ci_lower, 5),
+      ci_upper   = round(x$cov_eta_z$ci_upper, 5),
+      sign_share = round(x$cov_eta_z$sign_share, 2)
+    )
+    print(cov_table, row.names = FALSE)
+  }
   cat("\nUse plot(x) for the top S(z_k) pairs, x$S_table for every pair.\n")
   invisible(x)
 }
