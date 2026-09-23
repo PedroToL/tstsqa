@@ -16,6 +16,7 @@ qa_diagnose(
   n_grid = 200,
   subsample_cap = 5000,
   donor_weights = NULL,
+  target_weights = NULL,
   verbose = 2
 )
 }
@@ -78,15 +79,24 @@ size.}
 
 \item{donor_weights}{Optional numeric vector, length \code{nrow(donor_data)},
 of nonnegative survey/design weights for the donor sample. Weighting is
-intentionally NOT applied to the \code{lm()}/\code{glm()} first-stage
-fits themselves (cross-checking on real survey data found this made no
-measurable difference to recovery); \code{donor_weights} instead enters
-the \eqn{R^2_{y,d}} and \eqn{S_i(z_k)} calculations directly, and the
-quantile estimation inside every \code{qa_fit} call (including the
-final one), where it was found to matter. Whenever the donor sample is
-bootstrapped, the corresponding weights are resampled using the
-identical drawn indices, so they stay aligned with whichever rows were
-actually sampled. Defaults to \code{NULL} (uniform weights).}
+applied neither to the \code{lm()}/\code{glm()} first-stage fits, nor to
+\eqn{R^2_{y,d}}, nor to \eqn{S_i(z_k)} -- all three are unweighted
+devices. \code{donor_weights} instead enters the quantile estimation
+inside every \code{qa_fit} call (including the final one), and the
+donor-side standard deviation in \eqn{\rho^*}. Whenever the donor
+sample is bootstrapped, the corresponding weights are resampled using
+the identical drawn indices, so they stay aligned with whichever rows
+were actually sampled. Defaults to \code{NULL} (uniform weights).}
+
+\item{target_weights}{Optional numeric vector, length
+\code{nrow(target_data)}, of nonnegative survey/design weights for the
+target sample. Used only in the \eqn{\rho^*} calculation, where both
+\eqn{\mathrm{Cov}(\tilde\eta, z_k)} and \eqn{\sigma_{z_\perp}} are
+target-sample population moments. Supply this whenever
+\code{donor_weights} is supplied and any downstream \eqn{\lambda} is
+computed with weights, since \eqn{\lambda = \rho^*/\rho} holds only
+when both sides are computed in the same metric. Defaults to
+\code{NULL} (uniform weights).}
 
 \item{verbose}{Integer: \code{0} for silent operation, \code{1} to print
 only progress (section headers and bootstrap progress/ETA), or
@@ -109,10 +119,23 @@ A list (class \code{"qa_diagnose"}) with components:
     rows; use this directly for the complete table.}
   \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
     \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
-    final predictor set.}
+    final predictor set. Always unweighted, regardless of
+    \code{donor_weights}; see Details.}
   \item{rho_star}{A list with \code{mean}, \code{ci_lower}, and
     \code{ci_upper}, each a named vector (one entry per \code{z_vars}):
-    the bootstrapped regime diagnostic \eqn{\rho^*}.}
+    the bootstrapped regime diagnostic \eqn{\rho^*}. Weighted by
+    \code{donor_weights}/\code{target_weights} whenever either is
+    supplied.}
+  \item{cov_yhat_eta}{A list with \code{mean}, \code{ci_lower}, and
+    \code{ci_upper}: the bootstrapped target-sample covariance between
+    the first-stage prediction and the realised quantile gap,
+    \eqn{\mathrm{Cov}(\hat y, \tilde\eta)}, for the final predictor set.
+    Computed on the model scale (log scale when
+    \code{outcome_scale = "log"}), which is the scale on which
+    \eqn{\mathrm{Var}(\hat y + \tilde\eta) = \mathrm{Var}(\hat y) +
+    \mathrm{Var}(\tilde\eta) + 2\,\mathrm{Cov}(\hat y, \tilde\eta)}
+    holds, so this is the cross term in the variance the adjustment
+    restores. Weighted by \code{target_weights} when supplied.}
   \item{qa_fit}{The full return value of the
     \code{\link{qa_fit}} call on the final predictor set, fit on the
     full (non-subsampled) data.}

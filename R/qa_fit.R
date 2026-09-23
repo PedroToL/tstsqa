@@ -36,9 +36,10 @@
 #'     gap is estimated in log space and the final adjusted values are
 #'     exponentiated back to levels.
 #'   \item \code{"level"}: the outcome is left untransformed and the first
-#'     stage is a Gaussian GLM with a log link,
-#'     \code{glm(y ~ X, family = gaussian(link = "log"))}. Predictions are
-#'     taken on the response (level) scale via \code{type = "response"}, so
+#'     stage is a GLM fit with the \code{family} argument,
+#'     \code{glm(y ~ X, family = family)} (defaulting to a Gaussian log-link
+#'     GLM, \code{gaussian(link = "log")}, to match earlier package
+#'     versions). Predictions are
 #'     the quantile gap is estimated directly in levels and no
 #'     back-transformation is applied. This distinction matters because
 #'     the additive variance-restoration property
@@ -61,6 +62,18 @@
 #' (the current behavior) was empirically closer to unbiased across
 #' repeated simulation, at the cost of occasional instability in
 #' individual replications.
+#'
+#' \code{family} is only ever used on the \code{"level"} branch. The
+#' \code{"log"} branch always fits \code{lm(log(y) ~ X)}, since that specific
+#' OLS-on-log-scale form is what the variance-restoration derivation above
+#' assumes; passing a non-default \code{family} together with
+#' \code{outcome_scale = "log"} triggers a \code{warning()} and is ignored.
+#' Any family accepted by \code{\link[stats]{glm}} may be used on the
+#' \code{"level"} branch (e.g. \code{Gamma(link = "log")} for strictly
+#' positive, right-skewed outcomes); it is the caller's responsibility to
+#' choose a family appropriate to the outcome (e.g. a Gamma family requires
+#' strictly positive \code{y_var} values, which is not separately checked
+#' here beyond whatever \code{glm()} itself enforces).
 #'
 #' Weighting (via \code{donor_weights}) enters only through the empirical
 #' quantile estimates used to build \eqn{\hat\eta(p)}. It is the caller's
@@ -98,6 +111,12 @@
 #'   weights (unweighted quantiles). Weights need not sum to any particular
 #'   value; any positive common scale is equivalent, since quantiles are
 #'   scale-invariant to rescaling of the weights.
+#' @param family A \code{family} object (see \code{\link[stats]{family}}),
+#'   used as the \code{glm()} family when \code{outcome_scale = "level"}.
+#'   Defaults to \code{stats::gaussian(link = "log")}, matching earlier
+#'   versions of this function. Ignored (with a \code{warning()}) when
+#'   \code{outcome_scale = "log"}, which always fits \code{lm(log(y) ~ X)}
+#'   regardless of this argument.
 #'
 #' @return A list (class \code{"qa_fit"}) with components:
 #'   \item{model}{The fitted first-stage model object (\code{lm} or \code{glm}).}
@@ -138,6 +157,12 @@
 #' target <- data.frame(X = X[2501:5000])
 #' result <- qa_fit(donor, target, y_var = "y", x_vars = "X",
 #'                                outcome_scale = "log")
+#'
+#' # Level-scale fit with a Gamma family instead of the Gaussian default,
+#' # often a better fit for strictly positive, right-skewed outcomes.
+#' result_gamma <- qa_fit(donor, target, y_var = "y", x_vars = "X",
+#'                                outcome_scale = "level",
+#'                                family = stats::Gamma(link = "log"))
 #' }
 #'
 #' @importFrom rlang .data
@@ -145,9 +170,29 @@
 qa_fit <- function(donor_data, target_data, y_var, x_vars,
                                  outcome_scale = c("log", "level"),
                                  n_grid = 200,
-                                 donor_weights = NULL) {
+                                 donor_weights = NULL,
+                                 family = stats::gaussian(link = "log")) {
 
   outcome_scale <- match.arg(outcome_scale)
+
+  # --- Input validation: family (only meaningful for outcome_scale = "level")
+  # The "log" branch is always lm(log(y) ~ X): that specific OLS-on-log-scale
+  # form is what the paper's variance-restoration derivation assumes, so it
+  # is not a GLM family choice. `family` only ever reaches glm() below.
+  if (!inherits(family, "family")) {
+    stop("family must be a family object, e.g. stats::Gamma(link = \"log\") ",
+         "or stats::gaussian(link = \"log\"). See ?family.")
+  }
+  # NOTE: comparing family objects with identical() would be wrong here --
+  # two structurally identical calls to stats::gaussian(link = "log") are
+  # NOT identical() to each other, since each call creates fresh closures
+  # (linkfun, linkinv, etc.) with distinct environment pointers. Comparing
+  # the two fields that actually identify a family avoids that trap.
+  is_default_family <- identical(family$family, "gaussian") && identical(family$link, "log")
+  if (outcome_scale == "log" && !is_default_family) {
+    warning("family is ignored when outcome_scale = 'log': that branch always ",
+            "fits lm(log(y) ~ X).")
+  }
 
   # --- Input validation: basic types --------------------------------------
   if (!is.data.frame(donor_data)) {
@@ -264,8 +309,7 @@ qa_fit <- function(donor_data, target_data, y_var, x_vars,
     y_model_d <- donor_data[[y_var]]
     fit_data <- cbind(donor_data, y_model_d)
     model_formula <- stats::reformulate(x_vars, response = "y_model_d")
-    hat_f <- stats::glm(model_formula, data = fit_data,
-                         family = stats::gaussian(link = "log"))
+    hat_f <- stats::glm(model_formula, data = fit_data, family = family)
     y_hat_d <- stats::predict(hat_f, newdata = donor_data, type = "response")
   }
 
@@ -431,6 +475,10 @@ print.qa_fit <- function(x, ...) {
   outcome_scale <- if (identical(class(x$model)[1], "glm")) "level" else "log"
   cat("<qa_fit result>\n")
   cat(sprintf("  Outcome scale:      %s\n", outcome_scale))
+  if (outcome_scale == "level") {
+    cat(sprintf("  Family:             %s(link = \"%s\")\n",
+                x$model$family$family, x$model$family$link))
+  }
   cat(sprintf("  Predictors:         %s\n", paste(all.vars(stats::formula(x$model))[-1], collapse = ", ")))
   cat(sprintf("  Donor observations: %d\n", length(x$donor_resid)))
   cat(sprintf("  Target observations:%d\n", length(x$y_adjusted)))

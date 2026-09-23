@@ -52,6 +52,89 @@ test_that("quantile adjustment works on the level scale via a log-link GLM", {
   expect_length(result$y_adjusted, nrow(d$target))
 })
 
+test_that("family defaults to gaussian(link='log'), matching pre-existing behavior", {
+  d <- make_toy_data()
+  result_default  <- suppressWarnings(qa_fit(
+    d$donor, d$target, y_var = "y", x_vars = "X", outcome_scale = "level"
+  ))
+  result_explicit <- suppressWarnings(qa_fit(
+    d$donor, d$target, y_var = "y", x_vars = "X", outcome_scale = "level",
+    family = gaussian(link = "log")
+  ))
+  expect_equal(unname(result_default$y_adjusted), unname(result_explicit$y_adjusted))
+  expect_identical(result_default$model$family$family, "gaussian")
+  expect_identical(result_default$model$family$link, "log")
+})
+
+test_that("a non-default family runs on the level scale and changes the fit", {
+  d <- make_toy_data()
+  result_gamma <- suppressWarnings(qa_fit(
+    d$donor, d$target, y_var = "y", x_vars = "X", outcome_scale = "level",
+    family = Gamma(link = "log")
+  ))
+  expect_s3_class(result_gamma$model, "glm")
+  expect_identical(result_gamma$model$family$family, "Gamma")
+  expect_length(result_gamma$y_adjusted, nrow(d$target))
+})
+
+test_that("family must be a family object", {
+  d <- make_toy_data()
+  expect_error(
+    qa_fit(d$donor, d$target, "y", "X", outcome_scale = "level", family = "gaussian"),
+    "family object"
+  )
+})
+
+test_that("a non-default family on the log scale warns and is ignored", {
+  d <- make_toy_data()
+  # This toy data also triggers an unrelated common-support warning; isolate
+  # the one this test actually checks for, same approach as the existing
+  # annotate_p extrapolation test above.
+  suppress_common_support <- function(expr) {
+    withCallingHandlers(expr, warning = function(w) {
+      if (grepl("common support", conditionMessage(w))) invokeRestart("muffleWarning")
+    })
+  }
+  expect_warning(
+    result <- suppress_common_support(
+      qa_fit(d$donor, d$target, "y", "X", outcome_scale = "log", family = Gamma(link = "log"))
+    ),
+    "ignored when outcome_scale"
+  )
+  # log scale always fits lm(), never a GLM, regardless of the family argument
+  expect_s3_class(result$model, "lm")
+})
+
+test_that("print() shows the family only for the level-scale branch", {
+  d <- make_toy_data()
+  result_log   <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X", outcome_scale = "log"))
+  result_level <- suppressWarnings(qa_fit(d$donor, d$target, "y", "X", outcome_scale = "level",
+                                           family = Gamma(link = "log")))
+  expect_false(grepl("Family:", paste(capture.output(print(result_log)), collapse = "\n")))
+  expect_output(print(result_level), "Family:\\s+Gamma\\(link = \"log\"\\)")
+})
+
+test_that("the default family never spuriously triggers the log-scale ignored warning", {
+  # Regression test: identical() on two family objects is FALSE even when
+  # both are stats::gaussian(link = "log"), since each call to gaussian()
+  # creates fresh closures with distinct environments. An earlier version
+  # of this check used identical(family, stats::gaussian(link="log")) and
+  # fired the "ignored" warning on EVERY outcome_scale = "log" call,
+  # regardless of whether family was actually non-default.
+  d <- make_toy_data()
+  expect_no_ignored_warning <- function(expr) {
+    fired <- FALSE
+    withCallingHandlers(expr, warning = function(w) {
+      if (grepl("ignored when outcome_scale", conditionMessage(w))) fired <<- TRUE
+      invokeRestart("muffleWarning")
+    })
+    expect_false(fired)
+  }
+  expect_no_ignored_warning(qa_fit(d$donor, d$target, "y", "X", outcome_scale = "log"))
+  expect_no_ignored_warning(qa_fit(d$donor, d$target, "y", "X", outcome_scale = "log",
+                                    family = gaussian(link = "log")))
+})
+
 test_that("weighted quantiles run without error and preserve output length", {
   d <- make_toy_data()
   w <- runif(nrow(d$donor), 0.5, 1.5)

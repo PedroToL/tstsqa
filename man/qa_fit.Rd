@@ -11,7 +11,8 @@ qa_fit(
   x_vars,
   outcome_scale = c("log", "level"),
   n_grid = 200,
-  donor_weights = NULL
+  donor_weights = NULL,
+  family = stats::gaussian(link = "log")
 )
 }
 \arguments{
@@ -48,6 +49,13 @@ quantiles in the donor sample. Defaults to \code{NULL}, i.e. uniform
 weights (unweighted quantiles). Weights need not sum to any particular
 value; any positive common scale is equivalent, since quantiles are
 scale-invariant to rescaling of the weights.}
+
+\item{family}{A \code{family} object (see \code{\link[stats]{family}}),
+used as the \code{glm()} family when \code{outcome_scale = "level"}.
+Defaults to \code{stats::gaussian(link = "log")}, matching earlier
+versions of this function. Ignored (with a \code{warning()}) when
+\code{outcome_scale = "log"}, which always fits \code{lm(log(y) ~ X)}
+regardless of this argument.}
 }
 \value{
 A list (class \code{"qa_fit"}) with components:
@@ -96,9 +104,10 @@ and the first-stage model family, not just a cosmetic transform:
     gap is estimated in log space and the final adjusted values are
     exponentiated back to levels.
   \item \code{"level"}: the outcome is left untransformed and the first
-    stage is a Gaussian GLM with a log link,
-    \code{glm(y ~ X, family = gaussian(link = "log"))}. Predictions are
-    taken on the response (level) scale via \code{type = "response"}, so
+    stage is a GLM fit with the \code{family} argument,
+    \code{glm(y ~ X, family = family)} (defaulting to a Gaussian log-link
+    GLM, \code{gaussian(link = "log")}, to match earlier package
+    versions). Predictions are
     the quantile gap is estimated directly in levels and no
     back-transformation is applied. This distinction matters because
     the additive variance-restoration property
@@ -122,6 +131,18 @@ linear approximation understates the genuinely accelerating shape
 repeated simulation, at the cost of occasional instability in
 individual replications.
 
+\code{family} is only ever used on the \code{"level"} branch. The
+\code{"log"} branch always fits \code{lm(log(y) ~ X)}, since that specific
+OLS-on-log-scale form is what the variance-restoration derivation above
+assumes; passing a non-default \code{family} together with
+\code{outcome_scale = "log"} triggers a \code{warning()} and is ignored.
+Any family accepted by \code{\link[stats]{glm}} may be used on the
+\code{"level"} branch (e.g. \code{Gamma(link = "log")} for strictly
+positive, right-skewed outcomes); it is the caller's responsibility to
+choose a family appropriate to the outcome (e.g. a Gamma family requires
+strictly positive \code{y_var} values, which is not separately checked
+here beyond whatever \code{glm()} itself enforces).
+
 Weighting (via \code{donor_weights}) enters only through the empirical
 quantile estimates used to build \eqn{\hat\eta(p)}. It is the caller's
 responsibility to have already computed weights appropriate for aligning
@@ -142,6 +163,12 @@ donor <- data.frame(y = y[1:2500], X = X[1:2500])
 target <- data.frame(X = X[2501:5000])
 result <- qa_fit(donor, target, y_var = "y", x_vars = "X",
                                outcome_scale = "log")
+
+# Level-scale fit with a Gamma family instead of the Gaussian default,
+# often a better fit for strictly positive, right-skewed outcomes.
+result_gamma <- qa_fit(donor, target, y_var = "y", x_vars = "X",
+                               outcome_scale = "level",
+                               family = stats::Gamma(link = "log"))
 }
 
 }

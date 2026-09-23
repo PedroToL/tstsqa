@@ -121,20 +121,141 @@ test_that("S_table has every pair, but plot() shows no more than 5 bars", {
   expect_lte(nrow(p3$data), 3)
 })
 
-test_that("donor_weights runs end-to-end and changes the result", {
+test_that("donor_weights runs end-to-end, leaves R2_y_donor unaffected, but still moves rho_star", {
   d <- make_toy_data()
-  set.seed(99)
+  set.seed(1)
   w <- runif(nrow(d$donor), 0.5, 2)
+
+  # R2_y_donor is now always unweighted by design (the first-stage fit is
+  # never weighted, and its R^2 is a plain cor()^2); with the SAME bootstrap
+  # draws (matched seed), weighted and unweighted calls must agree exactly.
+  set.seed(99)
   result_unweighted <- suppressWarnings(qa_diagnose(
     d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
   ))
+  set.seed(99)
   result_weighted <- suppressWarnings(qa_diagnose(
     d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0,
     donor_weights = w
   ))
   expect_true(is.list(result_weighted))
-  expect_false(isTRUE(all.equal(result_unweighted$R2_y_donor$mean,
-                                  result_weighted$R2_y_donor$mean)))
+  expect_equal(result_unweighted$R2_y_donor$mean, result_weighted$R2_y_donor$mean)
+
+  # rho_star DOES still respond to donor_weights, since donor_weights enters
+  # the quantile step inside qa_fit() (which feeds eta into rho_star), even
+  # though it no longer enters R2_y_donor.
+  expect_false(isTRUE(all.equal(result_unweighted$rho_star$mean,
+                                  result_weighted$rho_star$mean)))
+})
+
+test_that("cov_yhat_eta is returned with mean and a percentile CI", {
+  d <- make_toy_data()
+  result <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  expect_true(is.list(result$cov_yhat_eta))
+  expect_named(result$cov_yhat_eta, c("mean", "ci_lower", "ci_upper"))
+  expect_true(is.finite(result$cov_yhat_eta$mean))
+  expect_lte(result$cov_yhat_eta$ci_lower, result$cov_yhat_eta$mean)
+  expect_gte(result$cov_yhat_eta$ci_upper, result$cov_yhat_eta$mean)
+})
+
+test_that("cov_yhat_eta is the cross term of the variance decomposition", {
+  # Var(y_hat + eta) = Var(y_hat) + Var(eta) + 2Cov(y_hat, eta) on the model
+  # scale. Checked against the full-data qa_fit the diagnosis returns, which
+  # is what cov_yhat_eta bootstraps around.
+  d <- make_toy_data()
+  result <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  yh  <- result$qa_fit$y_hat_target
+  eta <- result$qa_fit$eta_target
+  lhs <- stats::var(yh + eta)
+  rhs <- stats::var(yh) + stats::var(eta) + 2 * stats::cov(yh, eta)
+  expect_equal(lhs, rhs)
+  # and the bootstrap mean should be in the neighbourhood of the full-data value
+  expect_equal(result$cov_yhat_eta$mean, stats::cov(yh, eta), tolerance = 0.5)
+})
+
+test_that("cov_yhat_eta responds to target_weights", {
+  d <- make_toy_data()
+  set.seed(7)
+  a <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0
+  ))
+  set.seed(7)
+  b <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0,
+    target_weights = runif(nrow(d$target), 0.5, 2)
+  ))
+  expect_false(isTRUE(all.equal(a$cov_yhat_eta$mean, b$cov_yhat_eta$mean)))
+})
+
+test_that("print() shows Cov(y_hat, eta), and tolerates older results without it", {
+  d <- make_toy_data()
+  result <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", "z1", c("X1", "X2"), B = 10, verbose = 0
+  ))
+  expect_output(print(result), "Cov\\(y_hat, eta\\)")
+  # a result saved before this component existed must still print
+  old_style <- result
+  old_style$cov_yhat_eta <- NULL
+  expect_output(print(old_style), "R\\^2_y,d")
+})
+
+test_that("uniform (even non-unit) weights reproduce the unweighted rho*", {
+  d <- make_toy_data()
+  set.seed(42)
+  a <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0
+  ))
+  set.seed(42)
+  # Constant, non-1 weights are the sharper check: rep(1, ...) would pass
+  # even with a normalization bug that rep(1,...) happens to not expose.
+  b <- suppressWarnings(qa_diagnose(
+    d$donor, d$target, "y", c("z1", "z2"), c("X1", "X2", "X3"), B = 10, verbose = 0,
+    donor_weights  = rep(1, nrow(d$donor)),
+    target_weights = rep(2, nrow(d$target))
+  ))
+  expect_equal(a$rho_star$mean, b$rho_star$mean, tolerance = 1e-8)
+})
+
+test_that("rho*/rho recovers lambda under consistent weighting", {
+  # donor = target = one sample, weights supplied to both, everything
+  # computed with .wcov. This is the identity the weighting inconsistency
+  # broke: lambda = Cov(eta, z)/Cov(eps, z) should equal rho_star/rho when
+  # both are computed in the same (weighted) metric.
+  set.seed(7)
+  n  <- 4000
+  X1 <- rnorm(n); u <- rnorm(n)
+  y  <- exp(1 + 0.6 * X1 + 0.8 * u)
+  z  <- 0.4 * X1 + 0.5 * u + rnorm(n, sd = 0.7)
+  w  <- exp(rnorm(n, sd = 0.8))
+  dat <- data.frame(y = y, X1 = X1, z = z)
+
+  dg <- suppressWarnings(qa_diagnose(
+    dat, dat, "y", "z", "X1", outcome_scale = "log",
+    B = 30, subsample_cap = 2000, donor_weights = w, target_weights = w, verbose = 0
+  ))
+
+  eps   <- dg$qa_fit$donor_resid
+  eta   <- dg$qa_fit$eta_target
+  zperp <- residuals(lm(z ~ X1, data = dat))
+
+  lambda        <- .wcov(eta, dat$z, w) / .wcov(eps, dat$z, w)
+  rho           <- .wcov(eps, zperp, w) / sqrt(.wvar(eps, w) * .wvar(zperp, w))
+  rho_star_full <- .wcov(eta, dat$z, w) / sqrt(.wvar(eps, w) * .wvar(zperp, w))
+
+  expect_equal(lambda, rho_star_full / rho, tolerance = 1e-2)
+})
+
+test_that("target_weights length mismatch errors", {
+  d <- make_toy_data()
+  expect_error(
+    qa_diagnose(d$donor, d$target, "y", "z1", c("X1", "X2"), B = 5, verbose = 0,
+                target_weights = rep(1, 3)),
+    "target_weights has length"
+  )
 })
 
 test_that("donor_weights validation fires for length mismatch, negatives, all-zero", {

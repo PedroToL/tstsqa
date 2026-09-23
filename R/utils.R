@@ -84,3 +84,16 @@
 
   invisible(NULL)
 }
+
+# --- Weighted covariance/variance, matching stats::cov.wt(method =
+# "unbiased"). Defined here so every weighted moment in the package shares
+# one normalisation: rho*'s numerator (target weights) and its two
+# denominator terms (donor and target weights) would otherwise carry
+# slightly different cov.wt normalising constants that do not cancel in
+# the ratio.
+.wcov <- function(x, y, w) {
+  w <- w / sum(w)
+  sum(w * (x - sum(w * x)) * (y - sum(w * y))) / (1 - sum(w^2))
+}
+
+.wvar <- function(x, w) .wcov(x, x, w)

@@ -20,13 +20,10 @@
 #   data (not a subsample) is also returned, for the actual adjustment
 #   applied to the whole target sample.
 #
-#   Optional donor_weights (survey/design weights) enter the R^2_{y,d} and
-#   S_i(z_k) calculations and the quantile estimation inside every qa_fit()
-#   call, but are NOT passed to the lm()/glm() first-stage fits themselves
-#   (found empirically to make no measurable difference there). Every donor
-#   bootstrap draw resamples the weights using the identical drawn indices.
-#   z_k ~ X regressions in the target sample remain unweighted regardless
-#   (see Still-open limitations).
+#   Optional donor_weights/target_weights (survey/design weights) enter only
+#   where a population moment is estimated: the quantile step inside every
+#   qa_fit() call, and the rho* calculation. The first-stage fits,
+#   R^2_{y,d}, S_i(z_k), and the z_k ~ x_vars regressions are all unweighted.
 #
 # HARDENED -- current state:
 #   - Full input validation: types, required columns, numeric checks, no
@@ -54,15 +51,12 @@
 # then, callers of this file must source("R/qa_fit.R") first.
 
 # --- Small internal helper: fit the first stage and compute in-sample R^2 -
-# weights, if supplied, are passed to lm()/glm() as prior weights (matching
-# qa_fit()'s own WLS/GLM-var-weights treatment of donor_weights), and the
-# R^2 itself is computed as a weighted variance ratio via Hmisc::wtd.var()
-# so the diagnostic stays consistent with a weighted first-stage fit.
-.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale, weights = NULL) {
-  if (is.null(weights)) weights <- rep(1, nrow(data))
-  # weights intentionally NOT passed to lm()/glm() here -- see qa_fit.R for
-  # the same change and its rationale. weights is still used below, in the
-  # R^2 calculation itself.
+# Neither the fit nor the R^2 is weighted. The first stage is a prediction
+# device whose coefficients are never interpreted, so it is fit unweighted
+# for efficiency, and R^2 is the ordinary functional of that fit. Survey
+# weights enter only where a population moment is estimated: the quantile
+# step inside qa_fit(), and the rho* calculation below.
+.fit_first_stage_r2 <- function(data, y_var, x_vars, outcome_scale) {
   if (outcome_scale == "log") {
     y_model <- log(data[[y_var]])
     fit_data <- cbind(data, y_model)
@@ -76,17 +70,19 @@
     mod <- stats::glm(f, data = fit_data, family = stats::gaussian(link = "log"))
     y_hat <- stats::predict(mod, newdata = data, type = "response")
   }
-  r2 <- Hmisc::wtd.var(y_hat, weights = weights) / Hmisc::wtd.var(y_model, weights = weights)
+  # cor()^2 rather than summary(mod)$r.squared: identical for the OLS
+  # branch with an intercept, and a bounded pseudo-R^2 for the GLM branch,
+  # which has no r.squared slot.
+  r2 <- stats::cor(y_model, y_hat)^2
   list(model = mod, y_model = y_model, y_hat = y_hat, r2 = r2)
 }
 
 
 
 # --- Small internal helper: single-pass S_i(z_k) matrix, in-sample --------
-.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale,
-                               donor_weights = NULL) {
+.compute_S_matrix <- function(donor_data, target_data, y_var, z_vars, active, outcome_scale) {
 
-  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale, donor_weights)
+  fit_y_full <- .fit_first_stage_r2(donor_data, y_var, active, outcome_scale)
   R2_y_full  <- fit_y_full$r2
 
   R2_z_full <- sapply(z_vars, function(z_k) {
@@ -103,7 +99,7 @@
     for (i in active) {
       reduced <- setdiff(active, i)
 
-      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale, donor_weights)
+      fit_y_reduced <- .fit_first_stage_r2(donor_data, y_var, reduced, outcome_scale)
       delta_y_i <- R2_y_full - fit_y_reduced$r2
 
       for (z_k in z_vars) {
@@ -253,15 +249,23 @@
 #'   size.
 #' @param donor_weights Optional numeric vector, length \code{nrow(donor_data)},
 #'   of nonnegative survey/design weights for the donor sample. Weighting is
-#'   intentionally NOT applied to the \code{lm()}/\code{glm()} first-stage
-#'   fits themselves (cross-checking on real survey data found this made no
-#'   measurable difference to recovery); \code{donor_weights} instead enters
-#'   the \eqn{R^2_{y,d}} and \eqn{S_i(z_k)} calculations directly, and the
-#'   quantile estimation inside every \code{qa_fit} call (including the
-#'   final one), where it was found to matter. Whenever the donor sample is
-#'   bootstrapped, the corresponding weights are resampled using the
-#'   identical drawn indices, so they stay aligned with whichever rows were
-#'   actually sampled. Defaults to \code{NULL} (uniform weights).
+#'   applied neither to the \code{lm()}/\code{glm()} first-stage fits, nor to
+#'   \eqn{R^2_{y,d}}, nor to \eqn{S_i(z_k)} -- all three are unweighted
+#'   devices. \code{donor_weights} instead enters the quantile estimation
+#'   inside every \code{qa_fit} call (including the final one), and the
+#'   donor-side standard deviation in \eqn{\rho^*}. Whenever the donor
+#'   sample is bootstrapped, the corresponding weights are resampled using
+#'   the identical drawn indices, so they stay aligned with whichever rows
+#'   were actually sampled. Defaults to \code{NULL} (uniform weights).
+#' @param target_weights Optional numeric vector, length
+#'   \code{nrow(target_data)}, of nonnegative survey/design weights for the
+#'   target sample. Used only in the \eqn{\rho^*} calculation, where both
+#'   \eqn{\mathrm{Cov}(\tilde\eta, z_k)} and \eqn{\sigma_{z_\perp}} are
+#'   target-sample population moments. Supply this whenever
+#'   \code{donor_weights} is supplied and any downstream \eqn{\lambda} is
+#'   computed with weights, since \eqn{\lambda = \rho^*/\rho} holds only
+#'   when both sides are computed in the same metric. Defaults to
+#'   \code{NULL} (uniform weights).
 #' @param verbose Integer: \code{0} for silent operation, \code{1} to print
 #'   only progress (section headers and bootstrap progress/ETA), or
 #'   \code{2} (default) for the full print described in Details (adds
@@ -282,10 +286,23 @@
 #'     rows; use this directly for the complete table.}
 #'   \item{R2_y_donor}{A list with \code{mean}, \code{ci_lower}, and
 #'     \code{ci_upper}: the bootstrapped in-sample \eqn{R^2_{y,d}} of the
-#'     final predictor set.}
+#'     final predictor set. Always unweighted, regardless of
+#'     \code{donor_weights}; see Details.}
 #'   \item{rho_star}{A list with \code{mean}, \code{ci_lower}, and
 #'     \code{ci_upper}, each a named vector (one entry per \code{z_vars}):
-#'     the bootstrapped regime diagnostic \eqn{\rho^*}.}
+#'     the bootstrapped regime diagnostic \eqn{\rho^*}. Weighted by
+#'     \code{donor_weights}/\code{target_weights} whenever either is
+#'     supplied.}
+#'   \item{cov_yhat_eta}{A list with \code{mean}, \code{ci_lower}, and
+#'     \code{ci_upper}: the bootstrapped target-sample covariance between
+#'     the first-stage prediction and the realised quantile gap,
+#'     \eqn{\mathrm{Cov}(\hat y, \tilde\eta)}, for the final predictor set.
+#'     Computed on the model scale (log scale when
+#'     \code{outcome_scale = "log"}), which is the scale on which
+#'     \eqn{\mathrm{Var}(\hat y + \tilde\eta) = \mathrm{Var}(\hat y) +
+#'     \mathrm{Var}(\tilde\eta) + 2\,\mathrm{Cov}(\hat y, \tilde\eta)}
+#'     holds, so this is the cross term in the variance the adjustment
+#'     restores. Weighted by \code{target_weights} when supplied.}
 #'   \item{qa_fit}{The full return value of the
 #'     \code{\link{qa_fit}} call on the final predictor set, fit on the
 #'     full (non-subsampled) data.}
@@ -314,6 +331,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
                                       outcome_scale = c("log", "level"),
                                       tau = 10, B = 100, n_grid = 200,
                                       subsample_cap = 5000, donor_weights = NULL,
+                                      target_weights = NULL,
                                       verbose = 2) {
 
   outcome_scale <- match.arg(outcome_scale)
@@ -417,6 +435,18 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     if (sum(donor_weights) == 0) stop("donor_weights cannot be all zero.")
   }
 
+  # --- Input validation: target_weights -----------------------------------
+  if (!is.null(target_weights)) {
+    if (length(target_weights) != nrow(target_data)) {
+      stop(sprintf(
+        "target_weights has length %d but target_data has %d rows; they must match.",
+        length(target_weights), nrow(target_data)
+      ))
+    }
+    if (any(target_weights < 0)) stop("target_weights must be nonnegative.")
+    if (sum(target_weights) == 0) stop("target_weights cannot be all zero.")
+  }
+
   # --- Input validation: verbose ------------------------------------------
   if (!is.numeric(verbose) || length(verbose) != 1 || !(verbose %in% c(0, 1, 2))) {
     stop("verbose must be a single value: 0 (silent), 1 (progress only), or 2 (full print).")
@@ -454,17 +484,10 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
         .print_progress(sprintf("Bootstrap progress: %d/%d (%.0f%%) - ETA: %s",
                                  b, B, 100 * b / B, .format_duration(eta)))
       }
-      if (is.null(donor_weights)) {
-        donor_sub <- .draw_subsample(donor_data, subsample_cap)
-        donor_weights_sub <- NULL
-      } else {
-        drawn <- .draw_subsample_with_weights(donor_data, donor_weights, subsample_cap)
-        donor_sub <- drawn$data
-        donor_weights_sub <- drawn$weights
-      }
+      donor_sub  <- .draw_subsample(donor_data,  subsample_cap)
       target_sub <- .draw_subsample(target_data, subsample_cap)
       S_boot[, , b] <- .compute_S_matrix(donor_sub, target_sub, y_var, z_vars,
-                                          active, outcome_scale, donor_weights_sub)$S
+                                          active, outcome_scale)$S
     }
     if (verbose >= 1) cat("\n")
 
@@ -539,6 +562,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
 
   r2_boot  <- rep(NA_real_, B)
   rho_boot <- matrix(NA_real_, nrow = B, ncol = length(z_vars), dimnames = list(NULL, z_vars))
+  cov_yhat_eta_boot <- rep(NA_real_, B)
   final_start_time <- Sys.time()
 
   for (b in seq_len(B)) {
@@ -557,9 +581,16 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       donor_sub <- drawn$data
       donor_weights_sub <- drawn$weights
     }
-    target_sub <- .draw_subsample(target_data, subsample_cap)
+    if (is.null(target_weights)) {
+      target_sub <- .draw_subsample(target_data, subsample_cap)
+      target_weights_sub <- NULL
+    } else {
+      drawn_t <- .draw_subsample_with_weights(target_data, target_weights, subsample_cap)
+      target_sub <- drawn_t$data
+      target_weights_sub <- drawn_t$weights
+    }
 
-    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale, donor_weights_sub)
+    fit_sub <- .fit_first_stage_r2(donor_sub, y_var, active, outcome_scale)
     r2_boot[b] <- fit_sub$r2
     eps_d_sub  <- fit_sub$y_model - fit_sub$y_hat
 
@@ -582,10 +613,22 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     if (is.null(qa_sub)) next
     eta_sub <- qa_sub$eta_target
 
+    dw <- if (is.null(donor_weights_sub))  rep(1, nrow(donor_sub))  else donor_weights_sub
+    tw <- if (is.null(target_weights_sub)) rep(1, nrow(target_sub)) else target_weights_sub
+
     rho_boot[b, ] <- sapply(z_vars, function(z_k) {
-      stats::cov(eta_sub, target_sub[[z_k]]) /
-        (stats::sd(eps_d_sub) * stats::sd(z_perp_sub[, z_k]))
+      .wcov(eta_sub, target_sub[[z_k]], tw) /
+        sqrt(.wvar(eps_d_sub, dw) * .wvar(z_perp_sub[, z_k], tw))
     })
+
+    # Cov(y_hat, eta) in the target sample, on the MODEL scale (log scale
+    # when outcome_scale = "log"), which is the scale on which the variance
+    # decomposition Var(y_hat + eta) = Var(y_hat) + Var(eta) + 2Cov(y_hat,
+    # eta) applies. A value near zero means the adjustment adds variance
+    # roughly additively; a large negative value means the correction is
+    # partly offsetting the prediction rather than adding to it. Weighted by
+    # target_weights, since this is a target-sample population moment.
+    cov_yhat_eta_boot[b] <- .wcov(qa_sub$y_hat_target, eta_sub, tw)
   }
   if (verbose >= 1) cat("\n")
 
@@ -599,6 +642,12 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
     mean     = colMeans(rho_boot, na.rm = TRUE),
     ci_lower = apply(rho_boot, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
     ci_upper = apply(rho_boot, 2, stats::quantile, probs = 0.975, na.rm = TRUE)
+  )
+
+  cov_yhat_eta <- list(
+    mean     = mean(cov_yhat_eta_boot, na.rm = TRUE),
+    ci_lower = unname(stats::quantile(cov_yhat_eta_boot, 0.025, na.rm = TRUE)),
+    ci_upper = unname(stats::quantile(cov_yhat_eta_boot, 0.975, na.rm = TRUE))
   )
 
   if (verbose >= 2) {
@@ -628,6 +677,7 @@ qa_diagnose <- function(donor_data, target_data, y_var, z_vars, x_vars,
       S_table             = S_table,
       R2_y_donor          = R2_y_donor,
       rho_star            = rho_star,
+      cov_yhat_eta        = cov_yhat_eta,
       qa_fit              = qa_result
     ),
     class = "qa_diagnose"
@@ -696,6 +746,12 @@ print.qa_diagnose <- function(x, ...) {
   cat(sprintf("  Predictors removed:  %d\n", length(x$removed_predictors)))
   cat(sprintf("  R^2_y,d: mean = %.4f, 95%% CI [%.4f, %.4f]\n",
               x$R2_y_donor$mean, x$R2_y_donor$ci_lower, x$R2_y_donor$ci_upper))
+  # Guard for objects created before cov_yhat_eta was added to the return
+  # value, so print() still works on a saved result from an older version.
+  if (!is.null(x$cov_yhat_eta)) {
+    cat(sprintf("  Cov(y_hat, eta): mean = %.4f, 95%% CI [%.4f, %.4f]\n",
+                x$cov_yhat_eta$mean, x$cov_yhat_eta$ci_lower, x$cov_yhat_eta$ci_upper))
+  }
   cat("\n  rho*:\n")
   rho_table <- data.frame(
     z_var    = names(x$rho_star$mean),
